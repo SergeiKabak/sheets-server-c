@@ -1,0 +1,14 @@
+# Environment variables (secrets)
+.env
+
+# Compiled binaries
+server
+server_mac
+test_popen
+
+# Build artifacts
+*.o
+*.out
+
+# OS files
+.DS_Store
