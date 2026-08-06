@@ -1002,10 +1002,12 @@ static void serve_miniapp(int fd) {
         "</style></head><body><div class='c'><div id='months' class='m'></div>"
         "<div id='table' class='t h'></div><div id='nav' class='x h'>"
         "<button id='prev'>◀ Назад</button><button id='next'>Вперёд ▶</button>"
-        "</div></div><script>";
+        "</div><div id='dbg' style='padding:8px;color:#c00;font-size:12px'></div>"
+        "</div><script>";
     const char html_suffix[] =
         "function esc(s){if(!s)return '';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;')}"
         "let M=[];let cur=-1;const T=window.Telegram&&window.Telegram.WebApp?window.Telegram.WebApp:null;if(T)T.expand();"
+        "function dbg(msg){const d=document.getElementById('dbg');if(d)d.textContent=msg;console.log(msg);}"
         "function showMonths(){const c=document.getElementById('months');c.innerHTML='';"
         "M.forEach((m,i)=>{const b=document.createElement('button');b.className='b'+(i===cur?' a':'');"
         "b.textContent=m;b.onclick=()=>load(i);c.appendChild(b)})}"
@@ -1018,18 +1020,25 @@ static void serve_miniapp(int fd) {
         "for(let i=0;i<n;i++)h+='<td>'+esc(s1[i]||'')+'</td>';"
         "h+='</tr><tr><td></td>';"
         "for(let i=0;i<n;i++)h+='<td>'+esc(s2[i]||'')+'</td>';"
-        "h+='</tr></tbody></table>';w.innerHTML=h;w.classList.remove('h');document.getElementById('nav').classList.remove('h');}"
-        "function load(i){cur=i;showMonths();fetch('/api/month?name='+encodeURIComponent(M[i])).then(r=>r.json()).then(showTable).catch(()=>alert('Ошибка'))}"
-        "function init(){fetch('/api/months').then(r=>r.json()).then(d=>{M=d.months||[];if(M.length)load(M.length-1)})}"
+        "h+='</tr></tbody></table>';w.innerHTML=h;w.classList.remove('h');document.getElementById('nav').classList.remove('h');dbg('');}"
+        "function load(i){cur=i;showMonths();dbg('Загрузка...');"
+        "fetch('/api/month?name='+encodeURIComponent(M[i])).then(r=>{dbg('HTTP '+r.status);return r.json()}).then(d=>{dbg('OK');showTable(d)}).catch(e=>{dbg('ERR: '+e);alert('Ошибка')})}"
+        "function init(){dbg('init...');fetch('/api/months').then(r=>{dbg('months HTTP '+r.status);return r.json()}).then(d=>{M=d.months||[];dbg('months='+M.length);if(M.length)load(M.length-1)})}"
         "document.getElementById('prev').onclick=()=>{if(cur>0)load(cur-1)};"
         "document.getElementById('next').onclick=()=>{if(cur<M.length-1)load(cur+1)};"
         "init();</script></body></html>";
 
-    /* Подставляем SEARCH_NAME в HTML */
-    size_t total = sizeof(html_prefix) - 1 + (SEARCH_NAME?strlen(SEARCH_NAME):0) + sizeof(html_suffix) - 1 + 64;
+    /* Подставляем SEARCH_NAME в HTML (безопасно, без snprintf с %) */
+    size_t pre_len = sizeof(html_prefix) - 1;
+    size_t name_len = SEARCH_NAME ? strlen(SEARCH_NAME) : 0;
+    size_t suf_len = sizeof(html_suffix) - 1;
+    size_t total = pre_len + name_len + suf_len + 64;
     char *buf = malloc(total);
     if (!buf) return;
-    snprintf(buf, total, "%s%s%s", html_prefix, SEARCH_NAME?SEARCH_NAME:"", html_suffix);
+    memcpy(buf, html_prefix, pre_len);
+    if (SEARCH_NAME) memcpy(buf + pre_len, SEARCH_NAME, name_len);
+    memcpy(buf + pre_len + name_len, html_suffix, suf_len);
+    buf[pre_len + name_len + suf_len] = '\0';
 
     /* Заменяем плейсхолдер %NAME% внутри JS на реальное имя */
     if (SEARCH_NAME && *SEARCH_NAME) {
@@ -1037,7 +1046,7 @@ static void serve_miniapp(int fd) {
         if (ph) {
             size_t nlen = strlen(SEARCH_NAME);
             size_t plen = strlen("%NAME%");
-            size_t blen = strlen(buf);
+            size_t blen = pre_len + name_len + suf_len;
             if (blen - plen + nlen + 1 < total) {
                 memmove(ph + nlen, ph + plen, blen - (ph - buf) - plen + 1);
                 memcpy(ph, SEARCH_NAME, nlen);
