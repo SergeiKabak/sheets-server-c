@@ -501,120 +501,9 @@ static long long jll(JNode *n) {
 }
 
 /* ================================================================
- * Гибкий парсер месяца из названия листа
- * ================================================================ */
-static const char *ru_long[]   = {"январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"};
-static const char *ru_gen[]    = {"января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"};
-static const char *ru_short[]  = {"янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"};
-static const char *en_long[]   = {"january","february","march","april","may","june","july","august","september","october","november","december"};
-static const char *en_short[]  = {"jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"};
-
-/* Переводит строку в нижний регистр с корректной обработкой UTF-8 кириллицы.
-   (tolower не работает с многобайтовыми символами). */
-static int lower_utf8(char *dst, size_t dstcap, const char *src) {
-    size_t j = 0;
-    const unsigned char *p = (const unsigned char *)src;
-    while (*p && j < dstcap - 1) {
-        if (p[0] == 0xD0 && p[1] >= 0x90 && p[1] <= 0x9F) {   /* А-П -> а-п */
-            dst[j++] = 0xD0;
-            dst[j++] = (char)(p[1] + 0x20);
-            p += 2;
-        } else if (p[0] == 0xD0 && p[1] >= 0xA0 && p[1] <= 0xAF) { /* Р-Я -> р-я */
-            dst[j++] = 0xD1;
-            dst[j++] = (char)(p[1] - 0x20);
-            p += 2;
-        } else if (p[0] == 0xD0 && p[1] == 0x81) {            /* Ё -> ё */
-            dst[j++] = 0xD1;
-            dst[j++] = 0x91;
-            p += 2;
-        } else {
-            dst[j++] = (char)tolower(*p);
-            p++;
-        }
-    }
-    dst[j] = '\0';
-    return 1;
-}
-
-static int detect_month_name(const char *t) {
-    for (int m = 0; m < 12; m++) {
-        if (strstr(t, ru_long[m]) || strstr(t, ru_gen[m]) || strstr(t, ru_short[m]) ||
-            strstr(t, en_long[m]) || strstr(t, en_short[m])) return m + 1;
-    }
-    return 0;
-}
-
-static int find_year_in(const char *s, int *year) {
-    int best = -1;
-    for (const char *p = s; *p; p++) {
-        if (isdigit((unsigned char)*p)) {
-            char *end;
-            long v = strtol(p, &end, 10);
-            int len = (int)(end - p);
-            if (v >= 2000 && v <= 2100) { best = (int)v; p = end - 1; }
-            else if (v >= 20 && v <= 99 && len == 2) { best = 2000 + (int)v; }
-        }
-    }
-    if (best >= 0) { *year = best; return 1; }
-    return 0;
-}
-
-static int detect_month_numeric(const char *t, int *year_out) {
-    for (const char *p = t; *p; p++) {
-        if (isdigit((unsigned char)*p)) {
-            char *e; long a = strtol(p, &e, 10);
-            const char *q = e;
-            if (*q == '.' || *q == '/' || *q == '-') {
-                q++;
-                if (isdigit((unsigned char)*q)) {
-                    char *e2; long b = strtol(q, &e2, 10);
-                    if (a >= 1 && a <= 12 && (b >= 1000 || (b >= 20 && b <= 99))) {
-                        int y = (int)b; if (y < 2000) y += 2000;
-                        *year_out = y; return (int)a;
-                    }
-                    if (a >= 2000 && a <= 2100 && b >= 1 && b <= 12) {
-                        *year_out = (int)a; return (int)b;
-                    }
-                }
-            }
-        }
-    }
-    return 0;
-}
-
-/* Парсит заголовок листа в (год, месяц 1-12). Возвращает 1 при успехе. */
-static int parse_month_title(const char *title, int *year, int *month) {
-    if (!title || !*title) return 0;
-    static char lower[512];
-    lower_utf8(lower, sizeof(lower), title);
-    const char *t = lower;
-
-    int y = -1, m = 0;
-    int y2 = -1;
-    int m2 = detect_month_numeric(t, &y2);
-    if (m2) { m = m2; y = y2; }
-    int mm = detect_month_name(t);
-    if (mm) m = mm;
-    int y3;
-    if (find_year_in(t, &y3)) y = y3;
-
-    if (!m) return 0;
-    if (y < 0) {
-        time_t now = time(NULL);
-        struct tm *lt = localtime(&now);
-        y = lt->tm_year + 1900;
-    }
-    *year = y;
-    *month = m;
-    return 1;
-}
-
-/* ================================================================
- * Данные по месяцам
+ * Данные по листам
  * ================================================================ */
 typedef struct {
-    int year;
-    int month;             /* 1-12 */
     char title[MAX_SHEET_NAME];
     char **shift1; int shift1_len;
     char **shift2; int shift2_len;
@@ -668,13 +557,6 @@ static int build_months(MonthEntry *out, int max) {
 
         MonthEntry *m = &out[count];
         memset(m, 0, sizeof(MonthEntry));
-
-        int y, mo;
-        if (!parse_month_title(sheets[i], &y, &mo)) {
-            free_rows(rows, row_lens, row_count); free(response); continue;
-        }
-        m->year = y;
-        m->month = mo;
         strncpy(m->title, sheets[i], MAX_SHEET_NAME - 1);
         m->title[MAX_SHEET_NAME - 1] = '\0';
 
@@ -708,8 +590,6 @@ static int save_months(MonthEntry *mo, int count) {
     if (!fp) return -1;
     fwrite(&count, sizeof(int), 1, fp);
     for (int i = 0; i < count; i++) {
-        fwrite(&mo[i].year, sizeof(int), 1, fp);
-        fwrite(&mo[i].month, sizeof(int), 1, fp);
         fwstr(fp, mo[i].title);
         fwrow(fp, mo[i].shift1, mo[i].shift1_len);
         fwrow(fp, mo[i].shift2, mo[i].shift2_len);
@@ -756,8 +636,6 @@ static int read_months(MonthEntry *mo, int max) {
         MonthEntry *m = &mo[i];
         memset(m, 0, sizeof(MonthEntry));
         char *title = NULL;
-        if (fread(&m->year, sizeof(int), 1, fp) != 1) break;
-        if (fread(&m->month, sizeof(int), 1, fp) != 1) break;
         if (frstr(fp, &title) < 0) break;
         strncpy(m->title, title ? title : "", MAX_SHEET_NAME - 1);
         m->title[MAX_SHEET_NAME - 1] = '\0';
@@ -772,12 +650,6 @@ static int read_months(MonthEntry *mo, int max) {
     }
     fclose(fp);
     return got;
-}
-
-static int cmp_month(const void *a, const void *b) {
-    const MonthEntry *x = a, *y = b;
-    if (x->year != y->year) return x->year - y->year;
-    return x->month - y->month;
 }
 
 /* ================================================================
@@ -821,10 +693,11 @@ static char *std_escape(const char *s) {
 /* Строит SVG месяца в *out (malloc). Возвращает 1 при успехе. */
 static int build_svg(MonthEntry *m, char **out) {
     int c1 = m->shift1_len, c2 = m->shift2_len;
-    int cols = c1 > c2 ? c1 : c2;
-    if (cols < 1) cols = 1;
+    int data_cols = c1 > c2 ? c1 : c2;
+    if (data_cols < 1) data_cols = 1;
 
-    int colw = 1600 / cols;
+    const int name_colw = 220;
+    int colw = 1600 / data_cols;
     if (colw < 48) colw = 48;
     if (colw > 220) colw = 220;
 
@@ -832,7 +705,7 @@ static int build_svg(MonthEntry *m, char **out) {
     const int headh = 40;
     const int pad = 12;
     const int rows = 2;
-    int width = cols * colw + pad * 2 + 8;
+    int width = name_colw + data_cols * colw + pad * 2 + 8;
     int height = pad + headh + rows * rowh + pad + 8;
 
     StrB b;
@@ -858,21 +731,23 @@ static int build_svg(MonthEntry *m, char **out) {
 
     /* --- сама таблица --- */
     int left = 13, top = 13;
-    int tw = cols * colw;
+    int tw = width - 24;
 
     /* шапка (зелёная) */
     sb_printf(&b, "<rect x='%d' y='%d' width='%d' height='%d' fill='#4CAF50'/>", left, top, tw, headh);
-    for (int k = 0; k < cols; k++) {
-        int x = left + k * colw;
-        if (k > 0)
-            sb_printf(&b, "<line x1='%d' y1='%d' x2='%d' y2='%d' stroke='#ffffff' stroke-width='1'/>",
-                      x, top, x, top + headh);
-        if (k == cols - 1)
-            sb_printf(&b, "<text x='%d' y='%d' fill='#ffffff' font-weight='bold' text-anchor='middle' dominant-baseline='middle'>Смен</text>",
-                      x + colw / 2, top + headh / 2 + 1);
-        else
-            sb_printf(&b, "<text x='%d' y='%d' fill='#ffffff' font-weight='bold' text-anchor='middle' dominant-baseline='middle'>%d</text>",
-                      x + colw / 2, top + headh / 2 + 1, k);
+    /* первая колонка заголовка */
+    sb_printf(&b, "<text x='%d' y='%d' fill='#ffffff' font-weight='bold' text-anchor='middle' dominant-baseline='middle'>%s</text>",
+              left + name_colw / 2, top + headh / 2 + 1, std_escape(m->title));
+    /* остальные колонки */
+    for (int k = 0; k < data_cols; k++) {
+        int x = left + name_colw + k * colw;
+        sb_printf(&b, "<line x1='%d' y1='%d' x2='%d' y2='%d' stroke='#ffffff' stroke-width='1'/>",
+                  x, top, x, top + headh);
+        const char *hdr = (k == data_cols - 1) ? "Смен" : NULL;
+        char buf[32];
+        if (!hdr) { snprintf(buf, sizeof(buf), "%d", k); hdr = buf; }
+        sb_printf(&b, "<text x='%d' y='%d' fill='#ffffff' font-weight='bold' text-anchor='middle' dominant-baseline='middle'>%s</text>",
+                  x + colw / 2, top + headh / 2 + 1, hdr);
     }
 
     /* строки данных */
@@ -882,8 +757,18 @@ static int build_svg(MonthEntry *m, char **out) {
         int yy = top + headh + r * rowh;
         sb_printf(&b, "<rect x='%d' y='%d' width='%d' height='%d' fill='%s'/>",
                   left, yy, tw, rowh, (r % 2 == 1) ? "#f2f2f2" : "#ffffff");
-        for (int k = 0; k < cols; k++) {
-            int x = left + k * colw;
+        /* первая колонка (ФИО / пусто) */
+        const char *name_val = (r == 0) ? SEARCH_NAME : "";
+        char *esc_name = std_escape(name_val);
+        sb_printf(&b, "<text x='%d' y='%d' fill='#222222' text-anchor='middle' dominant-baseline='middle'>%s</text>",
+                  left + name_colw / 2, yy + rowh / 2 + 1, esc_name);
+        free(esc_name);
+        /* вертикальная линия после имени */
+        sb_printf(&b, "<line x1='%d' y1='%d' x2='%d' y2='%d' stroke='#e0e0e0'/>",
+                  left + name_colw, yy, left + name_colw, yy + rowh);
+        /* данные по дням */
+        for (int k = 0; k < data_cols; k++) {
+            int x = left + name_colw + k * colw;
             if (k > 0)
                 sb_printf(&b, "<line x1='%d' y1='%d' x2='%d' y2='%d' stroke='#e0e0e0'/>",
                           x, yy, x, yy + rowh);
@@ -982,17 +867,9 @@ static int get_chat(long long id) {
 }
 
 static int pick_current_index(MonthEntry *mo, int count) {
+    (void)mo;
     if (count <= 0) return -1;
-    time_t now = time(NULL);
-    struct tm *lt = localtime(&now);
-    int cy = lt->tm_year + 1900, cm = lt->tm_mon + 1;
-    for (int i = 0; i < count; i++)
-        if (mo[i].year == cy && mo[i].month == cm) return i;
-    int best = -1;
-    for (int i = 0; i < count; i++)
-        if (mo[i].year < cy || (mo[i].year == cy && mo[i].month < cm)) best = i;
-    if (best >= 0) return best;
-    return 0;
+    return count - 1; /* последний лист по умолчанию */
 }
 
 static void show_index(long long cid, int idx, MonthEntry *mo, int count) {
@@ -1006,8 +883,8 @@ static void show_index(long long cid, int idx, MonthEntry *mo, int count) {
 static const char HELP_MSG[] =
     "Привет! Я бот-график смен.\n\n"
     "Команды:\n"
-    "/график или /schedule — показать график текущего месяца\n"
-    "Под ним кнопки ◀ / ▶ — листать месяцы.";
+    "/график или /schedule — показать последний лист\n"
+    "Под ним кнопки ◀ / ▶ — листать листы.";
 
 /* ================================================================
  * Обработка Telegram-update
@@ -1029,7 +906,6 @@ static void process_update(const char *body) {
             MonthEntry mo[MAX_MONTHS];
             memset(mo, 0, sizeof(mo));
             int count = read_months(mo, MAX_MONTHS);
-            qsort(mo, count, sizeof(MonthEntry), cmp_month);
 
             if (strstr(low, "график") || strstr(low, "schedule") || strstr(low, "расписан")) {
                 int ci = pick_current_index(mo, count);
@@ -1052,7 +928,6 @@ static void process_update(const char *body) {
         MonthEntry mo[MAX_MONTHS];
         memset(mo, 0, sizeof(mo));
         int count = read_months(mo, MAX_MONTHS);
-        qsort(mo, count, sizeof(MonthEntry), cmp_month);
 
         int gi = get_chat(cid);
         int idx = (gi >= 0) ? chats[gi].idx : -1;
