@@ -1003,11 +1003,12 @@ static void serve_miniapp(int fd) {
         "<div id='table' class='t h'></div><div id='nav' class='x h'>"
         "<button id='prev'>◀ Назад</button><button id='next'>Вперёд ▶</button>"
         "</div><div id='dbg' style='padding:8px;color:#c00;font-size:12px'></div>"
+        "<p id='hello' style='padding:10px;font-size:18px'>Загрузка...</p>"
         "</div><script>";
     const char html_suffix[] =
         "function esc(s){if(!s)return '';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;')}"
-        "let M=[];let cur=-1;const T=window.Telegram&&window.Telegram.WebApp?window.Telegram.WebApp:null;if(T)T.expand();"
-        "function dbg(msg){const d=document.getElementById('dbg');if(d)d.textContent=msg;console.log(msg);}"
+        "let M=[];let cur=-1;"
+        "function dbg(msg){try{const d=document.getElementById('dbg');if(d)d.textContent=msg;console.log(msg);}catch(e){console.log(e);}}"
         "function showMonths(){const c=document.getElementById('months');c.innerHTML='';"
         "M.forEach((m,i)=>{const b=document.createElement('button');b.className='b'+(i===cur?' a':'');"
         "b.textContent=m;b.onclick=()=>load(i);c.appendChild(b)})}"
@@ -1020,12 +1021,12 @@ static void serve_miniapp(int fd) {
         "for(let i=0;i<n;i++)h+='<td>'+esc(s1[i]||'')+'</td>';"
         "h+='</tr><tr><td></td>';"
         "for(let i=0;i<n;i++)h+='<td>'+esc(s2[i]||'')+'</td>';"
-        "h+='</tr></tbody></table>';w.innerHTML=h;w.classList.remove('h');document.getElementById('nav').classList.remove('h');dbg('');}"
-        "function load(i){cur=i;showMonths();dbg('Загрузка...');"
-        "fetch('/api/month?name='+encodeURIComponent(M[i])).then(r=>{dbg('HTTP '+r.status);return r.json()}).then(d=>{dbg('OK');showTable(d)}).catch(e=>{dbg('ERR: '+e);alert('Ошибка')})}"
-        "function init(){dbg('init...');fetch('/api/months').then(r=>{dbg('months HTTP '+r.status);return r.json()}).then(d=>{M=d.months||[];dbg('months='+M.length);if(M.length)load(M.length-1)})}"
-        "document.getElementById('prev').onclick=()=>{if(cur>0)load(cur-1)};"
-        "document.getElementById('next').onclick=()=>{if(cur<M.length-1)load(cur+1)};"
+        "h+='</tr></tbody></table>';w.innerHTML=h;w.classList.remove('h');document.getElementById('nav').classList.remove('h');dbg('table OK');}"
+        "function load(i){try{cur=i;showMonths();dbg('load '+i+' '+M[i]);"
+        "fetch('/api/month?name='+encodeURIComponent(M[i])).then(function(r){dbg('month HTTP '+r.status);return r;}).then(function(r){return r.json();}).then(function(d){dbg('month JSON OK');showTable(d)}).catch(function(e){dbg('month ERR: '+e);alert('Ошибка');});}catch(e){dbg('load ERR: '+e);}}"
+        "function init(){try{dbg('init...');var h=document.getElementById('hello');if(h)h.textContent='JS работает';fetch('/api/months').then(function(r){dbg('months HTTP '+r.status);return r;}).then(function(r){return r.json();}).then(function(d){M=d.months||[];dbg('months='+M.length);if(M.length){dbg('first='+M[M.length-1]);load(M.length-1);}else{dbg('NO MONTHS');if(h)h.textContent='Нет данных';}}).catch(function(e){dbg('months ERR: '+e);if(h)h.textContent='Ошибка сети';});}catch(e){dbg('init ERR: '+e);if(h)h.textContent='Ошибка JS';}}"
+        "document.getElementById('prev').onclick=function(){if(cur>0)load(cur-1)};"
+        "document.getElementById('next').onclick=function(){if(cur<M.length-1)load(cur+1)};"
         "init();</script></body></html>";
 
     /* Подставляем SEARCH_NAME в HTML (безопасно, без snprintf с %) */
