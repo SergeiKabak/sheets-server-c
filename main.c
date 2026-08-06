@@ -1009,27 +1009,8 @@ static void serve_miniapp(int fd) {
         "<script>document.getElementById('hello').textContent='Проверка JS...';</script>"
         "</div><script>";
     const char html_suffix[] =
-        "function esc(s){if(!s)return '';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;')}"
-        "let M=[];let cur=-1;"
-        "function dbg(msg){try{const d=document.getElementById('dbg');if(d)d.textContent=msg;console.log(msg);}catch(e){console.log(e);}}"
-        "function showMonths(){const c=document.getElementById('months');c.innerHTML='';"
-        "M.forEach((m,i)=>{const b=document.createElement('button');b.className='b'+(i===cur?' a':'');"
-        "b.textContent=m;b.onclick=()=>load(i);c.appendChild(b)})}"
-        "function showTable(d){const w=document.getElementById('table');const s1=d.s1||[];const s2=d.s2||[];"
-        "const n=Math.max(s1.length,s2.length,1);let h='<table><thead><tr>';"
-        "h+='<th>'+esc(d.t)+'</th>';"
-        "for(let i=0;i<n;i++){h+='<th>'+(i===n-1?'Смен':i)+'</th>';}"
-        "h+='</tr></thead><tbody>';"
-        "h+='<tr><td class=\"n\">' + esc('%NAME%') + '</td>';"
-        "for(let i=0;i<n;i++)h+='<td>'+esc(s1[i]||'')+'</td>';"
-        "h+='</tr><tr><td></td>';"
-        "for(let i=0;i<n;i++)h+='<td>'+esc(s2[i]||'')+'</td>';"
-        "h+='</tr></tbody></table>';w.innerHTML=h;w.classList.remove('h');document.getElementById('nav').classList.remove('h');dbg('table OK');}"
-        "function load(i){try{cur=i;showMonths();dbg('load '+i+' '+M[i]);"
-        "fetch('/api/month?name='+encodeURIComponent(M[i])).then(function(r){dbg('month HTTP '+r.status);return r;}).then(function(r){return r.json();}).then(function(d){dbg('month JSON OK');showTable(d)}).catch(function(e){dbg('month ERR: '+e);alert('Ошибка');});}catch(e){dbg('load ERR: '+e);}}"
-        "function init(){try{dbg('init...');var h=document.getElementById('hello');if(h)h.textContent='JS работает';fetch('/api/months').then(function(r){dbg('months HTTP '+r.status);return r;}).then(function(r){return r.json();}).then(function(d){M=d.months||[];dbg('months='+M.length);if(M.length){dbg('first='+M[M.length-1]);load(M.length-1);}else{dbg('NO MONTHS');if(h)h.textContent='Нет данных';}}).catch(function(e){dbg('months ERR: '+e);if(h)h.textContent='Ошибка сети';});}catch(e){dbg('init ERR: '+e);if(h)h.textContent='Ошибка JS';}}"
-        "document.getElementById('prev').onclick=function(){if(cur>0)load(cur-1)};"
-        "document.getElementById('next').onclick=function(){if(cur<M.length-1)load(cur+1)};"
+        "function dbg(msg){try{var d=document.getElementById('dbg');if(d)d.textContent=msg;console.log(msg);}catch(e){console.log(e);}}"
+        "function init(){try{dbg('init OK');document.getElementById('hello').textContent='JS работает';}catch(e){dbg('init ERR: '+e);document.getElementById('hello').textContent='Ошибка JS';}}"
         "init();</script></body></html>";
 
     /* Подставляем SEARCH_NAME в HTML (безопасно, без snprintf с %) */
