@@ -1031,6 +1031,20 @@ static void serve_miniapp(int fd) {
     if (!buf) return;
     snprintf(buf, total, "%s%s%s", html_prefix, SEARCH_NAME?SEARCH_NAME:"", html_suffix);
 
+    /* Заменяем плейсхолдер %NAME% внутри JS на реальное имя */
+    if (SEARCH_NAME && *SEARCH_NAME) {
+        char *ph = strstr(buf, "%NAME%");
+        if (ph) {
+            size_t nlen = strlen(SEARCH_NAME);
+            size_t plen = strlen("%NAME%");
+            size_t blen = strlen(buf);
+            if (blen - plen + nlen + 1 < total) {
+                memmove(ph + nlen, ph + plen, blen - (ph - buf) - plen + 1);
+                memcpy(ph, SEARCH_NAME, nlen);
+            }
+        }
+    }
+
     char header[256];
     int hlen = snprintf(header, sizeof(header),
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
