@@ -11,7 +11,7 @@ RUN gcc -O2 -Wall -Wextra -o server_app main.c
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl imagemagick librsvg2-bin fonts-dejavu-core && \
+        ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -19,7 +19,7 @@ WORKDIR /app
 COPY --from=builder /build/server_app .
 
 # Переменные окружения (секреты) задаются на Render:
-#   BOT_TOKEN, SPREADSHEET_ID, GOOGLE_API_KEY, FROM_COL, TO_COL, SEARCH_NAME, PORT
+#   BOT_TOKEN, SPREADSHEET_ID, GOOGLE_API_KEY, FROM_COL, TO_COL, SEARCH_NAME, MINIAPP_URL, PORT
 
 EXPOSE 8080
 

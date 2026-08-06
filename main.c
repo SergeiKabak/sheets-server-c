@@ -34,6 +34,7 @@ static const char *GOOGLE_API_KEY;
 static const char *FROM_COL;
 static const char *TO_COL;
 static const char *SEARCH_NAME;
+static const char *MINIAPP_URL;
 
 static void init_config(void) {
     BOT_TOKEN      = getenv("BOT_TOKEN");
@@ -42,6 +43,7 @@ static void init_config(void) {
     FROM_COL       = getenv("FROM_COL");
     TO_COL         = getenv("TO_COL");
     SEARCH_NAME    = getenv("SEARCH_NAME");
+    MINIAPP_URL    = getenv("MINIAPP_URL");
 }
 
 /* ================================================================
@@ -802,6 +804,8 @@ static char *json_escape(const char *s) {
     return o;
 }
 
+static void tg_send_web_app(long long chat_id, const char *url);
+
 static void tg_send_text(long long chat_id, const char *text) {
     char cmd[8192];
     snprintf(cmd, sizeof(cmd),
@@ -911,7 +915,11 @@ static void process_update(const char *body) {
                 int ci = pick_current_index(mo, count);
                 int gi = get_chat(cid);
                 if (gi >= 0) chats[gi].idx = ci;
-                show_index(cid, ci, mo, count);
+                if (MINIAPP_URL && *MINIAPP_URL) {
+                    tg_send_web_app(cid, MINIAPP_URL);
+                } else {
+                    show_index(cid, ci, mo, count);
+                }
             } else {
                 tg_send_text(cid, HELP_MSG);
             }
@@ -948,8 +956,90 @@ static void process_update(const char *body) {
 }
 
 /* ================================================================
- * HTTP-сервер (webhook + health-check)
+ * URL decode (query string)
  * ================================================================ */
+static void url_decode(char *dst, size_t dstcap, const char *src) {
+    size_t j = 0;
+    for (size_t i = 0; src[i] && j < dstcap - 1; i++) {
+        if (src[i] == '%' && src[i+1] && src[i+2]) {
+            unsigned int v = 0;
+            if (sscanf(src + i + 1, "%2x", &v) == 1) {
+                dst[j++] = (char)v;
+                i += 2;
+                continue;
+            }
+        }
+        if (src[i] == '+') { dst[j++] = ' '; continue; }
+        dst[j++] = src[i];
+    }
+    dst[j] = '\0';
+}
+
+/* ================================================================
+ * Mini App: HTML + API
+ * ================================================================ */
+static void serve_miniapp(int fd) {
+    const char html_prefix[] =
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'>"
+        "<title>График смен</title>"
+        "<script src='https://telegram.org/js/telegram-web-app.js'></script>"
+        "<style>"
+        "body{margin:0;font-family:DejaVu Sans,Arial,sans-serif;background:#f5f5f5}"
+        ".c{padding:10px}"
+        ".m{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}"
+        ".b{padding:8px 12px;border:none;border-radius:6px;background:#4CAF50;color:#fff;font-size:14px;cursor:pointer}"
+        ".b.a{background:#2E7D32}"
+        ".t{overflow-x:auto;background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1)}"
+        "table{border-collapse:collapse;width:100%;min-width:520px}"
+        "th,td{border:1px solid #e0e0e0;padding:8px;text-align:center;font-size:14px}"
+        "thead th{background:#4CAF50;color:#fff;font-weight:bold}"
+        "tbody tr:nth-child(even){background:#f9f9f9}"
+        ".n{font-weight:bold;background:#f1f8e9;min-width:180px}"
+        ".x{display:flex;gap:8px;margin-top:12px}"
+        ".x button{flex:1;padding:10px;border:none;border-radius:6px;background:#4CAF50;color:#fff;font-size:16px;cursor:pointer}"
+        ".h{display:none}"
+        "</style></head><body><div class='c'><div id='months' class='m'></div>"
+        "<div id='table' class='t h'></div><div id='nav' class='x h'>"
+        "<button id='prev'>◀ Назад</button><button id='next'>Вперёд ▶</button>"
+        "</div></div><script>";
+    const char html_suffix[] =
+        "function esc(s){if(!s)return '';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;')}"
+        "let M=[];let cur=-1;const T=window.Telegram&&window.Telegram.WebApp?window.Telegram.WebApp:null;if(T)T.expand();"
+        "function showMonths(){const c=document.getElementById('months');c.innerHTML='';"
+        "M.forEach((m,i)=>{const b=document.createElement('button');b.className='b'+(i===cur?' a':'');"
+        "b.textContent=m;b.onclick=()=>load(i);c.appendChild(b)})}"
+        "function showTable(d){const w=document.getElementById('table');const s1=d.s1||[];const s2=d.s2||[];"
+        "const n=Math.max(s1.length,s2.length,1);let h='<table><thead><tr>';"
+        "h+='<th>'+esc(d.t)+'</th>';"
+        "for(let i=0;i<n;i++){h+='<th>'+(i===n-1?'Смен':i)+'</th>';}"
+        "h+='</tr></thead><tbody>';"
+        "h+='<tr><td class=\"n\">' + esc('%NAME%') + '</td>';"
+        "for(let i=0;i<n;i++)h+='<td>'+esc(s1[i]||'')+'</td>';"
+        "h+='</tr><tr><td></td>';"
+        "for(let i=0;i<n;i++)h+='<td>'+esc(s2[i]||'')+'</td>';"
+        "h+='</tr></tbody></table>';w.innerHTML=h;w.classList.remove('h');document.getElementById('nav').classList.remove('h');}"
+        "function load(i){cur=i;showMonths();fetch('/api/month?name='+encodeURIComponent(M[i])).then(r=>r.json()).then(showTable).catch(()=>alert('Ошибка'))}"
+        "function init(){fetch('/api/months').then(r=>r.json()).then(d=>{M=d.months||[];if(M.length)load(M.length-1)})}"
+        "document.getElementById('prev').onclick=()=>{if(cur>0)load(cur-1)};"
+        "document.getElementById('next').onclick=()=>{if(cur<M.length-1)load(cur+1)};"
+        "init();</script></body></html>";
+
+    /* Подставляем SEARCH_NAME в HTML */
+    size_t total = sizeof(html_prefix) - 1 + (SEARCH_NAME?strlen(SEARCH_NAME):0) + sizeof(html_suffix) - 1 + 64;
+    char *buf = malloc(total);
+    if (!buf) return;
+    snprintf(buf, total, "%s%s%s", html_prefix, SEARCH_NAME?SEARCH_NAME:"", html_suffix);
+
+    char header[256];
+    int hlen = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+        strlen(buf));
+    write(fd, header, hlen);
+    write(fd, buf, strlen(buf));
+    free(buf);
+}
+
 static void http_reply(int fd, const char *status, const char *body) {
     char header[256];
     int hlen = snprintf(header, sizeof(header),
@@ -957,6 +1047,100 @@ static void http_reply(int fd, const char *status, const char *body) {
         status, strlen(body));
     write(fd, header, hlen);
     write(fd, body, strlen(body));
+}
+
+/* Отдаёт JSON: {"months":[...]} */
+static void api_months(int fd) {
+    MonthEntry mo[MAX_MONTHS];
+    memset(mo, 0, sizeof(mo));
+    int count = read_months(mo, MAX_MONTHS);
+
+    size_t cap = 64 + count * 64;
+    char *json = malloc(cap);
+    if (!json) { http_reply(fd, "500 Internal Server Error", "{}"); return; }
+    int off = snprintf(json, cap, "{\"months\":[");
+    for (int i = 0; i < count; i++) {
+        const char *esc = json_escape(mo[i].title);
+        int need = snprintf(json + off, cap - off, "%s\"%s\"", i ? "," : "", esc);
+        off += need;
+        free((void*)esc);
+    }
+    snprintf(json + off, cap - off, "]}");
+
+    char hdr[256];
+    int hlen = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+        strlen(json));
+    write(fd, hdr, hlen);
+    write(fd, json, strlen(json));
+    free(json);
+}
+
+/* Отдаёт JSON месяца по ?name=... */
+static void api_month(int fd, const char *query) {
+    const char *p = strstr(query, "name=");
+    if (!p) { http_reply(fd, "400 Bad Request", "{\"error\":\"missing name\"}"); return; }
+    p += 5;
+    char name[256];
+    url_decode(name, sizeof(name), p);
+
+    MonthEntry mo[MAX_MONTHS];
+    memset(mo, 0, sizeof(mo));
+    int count = read_months(mo, MAX_MONTHS);
+    int idx = -1;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(mo[i].title, name) == 0) { idx = i; break; }
+    }
+    if (idx < 0) { http_reply(fd, "404 Not Found", "{\"error\":\"not found\"}"); return; }
+
+    MonthEntry *m = &mo[idx];
+    int c1 = m->shift1_len, c2 = m->shift2_len;
+    int n = c1 > c2 ? c1 : c2; if (n < 1) n = 1;
+
+    size_t cap = 128 + n * 64;
+    char *json = malloc(cap);
+    if (!json) { http_reply(fd, "500 Internal Server Error", "{}"); return; }
+    int off = snprintf(json, cap, "{\"t\":");
+    const char *et = json_escape(m->title);
+    off += snprintf(json + off, cap - off, "\"%s\"", et);
+    free((void*)et);
+    off += snprintf(json + off, cap - off, ",\"s1\":[");
+    for (int i = 0; i < n; i++) {
+        const char *v = (i < c1 && m->shift1[i]) ? m->shift1[i] : "";
+        const char *ev = json_escape(v);
+        off += snprintf(json + off, cap - off, "%s\"%s\"", i ? "," : "", ev);
+        free((void*)ev);
+    }
+    off += snprintf(json + off, cap - off, "],\"s2\":[");
+    for (int i = 0; i < n; i++) {
+        const char *v = (i < c2 && m->shift2[i]) ? m->shift2[i] : "";
+        const char *ev = json_escape(v);
+        off += snprintf(json + off, cap - off, "%s\"%s\"", i ? "," : "", ev);
+        free((void*)ev);
+    }
+    snprintf(json + off, cap - off, "]}");
+
+    char hdr[256];
+    int hlen = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+        strlen(json));
+    write(fd, hdr, hlen);
+    write(fd, json, strlen(json));
+    free(json);
+}
+
+/* Отправляет web_app кнопку */
+static void tg_send_web_app(long long chat_id, const char *url) {
+    char *eu = json_escape(url);
+    char cmd[8192];
+    snprintf(cmd, sizeof(cmd),
+        "curl -sS --max-time 20 -X POST "
+        "-H 'Content-Type: application/json' "
+        "-d '{\"chat_id\":%lld,\"text\":\"Открыть график\",\"reply_markup\":{\"inline_keyboard\":[[{\"text\":\"\\uD83D\\uDCC5 График смен\",\"web_app\":{\"url\":\"%s\"}}]]}}' "
+        "https://api.telegram.org/bot%s/sendMessage",
+        chat_id, eu, BOT_TOKEN);
+    run_curl(cmd);
+    free(eu);
 }
 
 /* Диагностика: пробуем достучаться до Google Sheets и отдаём голову ответа */
@@ -1000,7 +1184,15 @@ static int handle_conn(int client_fd) {
         return 0;
     }
     if (strcmp(path, "/") == 0) {
-        http_reply(client_fd, "200 OK", "OK");
+        serve_miniapp(client_fd);
+        return 0;
+    }
+    if (strcmp(path, "/api/months") == 0) {
+        api_months(client_fd);
+        return 0;
+    }
+    if (strncmp(path, "/api/month", 10) == 0) {
+        api_month(client_fd, path);
         return 0;
     }
     if (strcmp(path, "/diag") == 0) {
