@@ -49,10 +49,10 @@ static void init_config(void) {
  * ================================================================ */
 static char *fetch_url(const char *url) {
     char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "curl -sS --max-time 20 '%s'", url);
+    snprintf(cmd, sizeof(cmd), "curl -sS --max-time 20 '%s' 2>&1", url);
 
     FILE *fp = popen(cmd, "r");
-    if (!fp) return NULL;
+    if (!fp) { fprintf(stderr, "[diag] popen failed\n"); return NULL; }
 
     char *buf = malloc(BUFFER_SIZE);
     if (!buf) { pclose(fp); return NULL; }
@@ -66,7 +66,9 @@ static char *fetch_url(const char *url) {
     buf[total] = '\0';
 
     int status = pclose(fp);
+    if (status != 0) fprintf(stderr, "[diag] curl status=%d url=%s\n", status, url);
     if (status != 0 || total == 0) {
+        if (total > 0) fprintf(stderr, "[diag] curl output: %.200s\n", buf);
         free(buf);
         return NULL;
     }
@@ -1082,6 +1084,16 @@ static void http_reply(int fd, const char *status, const char *body) {
     write(fd, body, strlen(body));
 }
 
+/* Диагностика: пробуем достучаться до Google Sheets и отдаём голову ответа */
+static char *diag_google(void) {
+    char url[1024];
+    snprintf(url, sizeof(url),
+        "https://sheets.googleapis.com/v4/spreadsheets/%s"
+        "?fields=sheets.properties(title,hidden)&key=%s",
+        SPREADSHEET_ID ? SPREADSHEET_ID : "", GOOGLE_API_KEY ? GOOGLE_API_KEY : "");
+    return fetch_url(url);
+}
+
 static int handle_conn(int client_fd) {
     char buf[BUFFER_SIZE];
     size_t total = 0;
@@ -1108,8 +1120,24 @@ static int handle_conn(int client_fd) {
     char *hdr = strstr(buf, "\r\n\r\n");
     if (hdr) body = hdr + 4;
 
-    if (strcmp(path, "/") == 0 || strcmp(path, "/health") == 0) {
+    if (strcmp(path, "/health") == 0) {
         http_reply(client_fd, "200 OK", "OK");
+        return 0;
+    }
+    if (strcmp(path, "/") == 0) {
+        http_reply(client_fd, "200 OK", "OK");
+        return 0;
+    }
+    if (strcmp(path, "/diag") == 0) {
+        char body[1024];
+        char *resp = diag_google();
+        if (resp) {
+            snprintf(body, sizeof(body), "google OK. head:\n%.700s", resp);
+            free(resp);
+        } else {
+            snprintf(body, sizeof(body), "google FAILED (curl error - см. лог: status и вывод curl)");
+        }
+        http_reply(client_fd, "200 OK", body);
         return 0;
     }
     if (strcmp(path, "/webhook") == 0) {
