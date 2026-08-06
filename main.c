@@ -1006,6 +1006,7 @@ static void serve_miniapp(int fd) {
         "<button id='prev'>◀ Назад</button><button id='next'>Вперёд ▶</button>"
         "</div><div id='dbg' style='padding:8px;color:#c00;font-size:12px'></div>"
         "<p id='hello' style='padding:10px;font-size:18px'>Загрузка...</p>"
+        "<script>document.getElementById('hello').textContent='Проверка JS...';</script>"
         "</div><script>";
     const char html_suffix[] =
         "function esc(s){if(!s)return '';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;')}"
