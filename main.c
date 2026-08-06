@@ -154,7 +154,7 @@ static int get_visible_sheets(char sheets[][MAX_SHEET_NAME], int max_sheets) {
         SPREADSHEET_ID, GOOGLE_API_KEY);
 
     char *response = fetch_url(url);
-    if (!response) return 0;
+    if (!response) { fprintf(stderr, "[diag] google metadata fetch failed (curl/newtwork)\n"); return 0; }
 
     int count = 0;
     const char *p = response;
@@ -192,6 +192,7 @@ static int get_visible_sheets(char sheets[][MAX_SHEET_NAME], int max_sheets) {
         p = prop_end;
     }
 
+    if (count == 0) fprintf(stderr, "[diag] google metadata head: %.300s\n", response);
     free(response);
     return count;
 }
@@ -627,6 +628,7 @@ static char **copy_row(char **src, int len) {
 static int build_months(MonthEntry *out, int max) {
     char sheets[MAX_SHEETS][MAX_SHEET_NAME];
     int sheet_count = get_visible_sheets(sheets, MAX_SHEETS);
+    fprintf(stderr, "[updater] visible sheets=%d SEARCH_NAME='%s'\n", sheet_count, SEARCH_NAME ? SEARCH_NAME : "");
     int count = 0;
 
     for (int i = 0; i < sheet_count && count < max; i++) {
@@ -1140,6 +1142,10 @@ int main(void) {
     if (port_env) port = atoi(port_env);
 
     init_config();
+
+    fprintf(stderr, "[config] SHEET=%s FROM=%s TO=%s SEARCH_NAME='%s'\n",
+            SPREADSHEET_ID ? SPREADSHEET_ID : "", FROM_COL ? FROM_COL : "",
+            TO_COL ? TO_COL : "", SEARCH_NAME ? SEARCH_NAME : "");
 
     if (!BOT_TOKEN || !SPREADSHEET_ID || !GOOGLE_API_KEY || !SEARCH_NAME) {
         fprintf(stderr, "[ERROR] Required env vars missing:\n");
