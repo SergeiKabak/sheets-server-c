@@ -2,7 +2,8 @@
 .env
 
 # Compiled binaries
-server
+sheet
+*.service
 server_mac
 test_popen
 

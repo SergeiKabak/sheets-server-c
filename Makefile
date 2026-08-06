@@ -8,7 +8,7 @@ LDFLAGS_ARM = -Wl,--gc-sections -s
 CC_NATIVE = gcc
 CFLAGS_NATIVE = -O2 -Wall -Wextra
 
-TARGET_ARM = server
+TARGET_ARM = sheet
 TARGET_NATIVE = server_app
 SRC = main.c
 
