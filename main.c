@@ -1184,7 +1184,9 @@ int main(void) {
         return 1;
     }
 
-    signal(SIGCHLD, SIG_IGN);
+    /* ВАЖНО: НЕ игнорируем SIGCHLD — на Linux это ломает waitpid() внутри
+       pclose() для popen/curl: pclose вернёт -1, и все fetch_url будут
+       ошибочно считаться проваленными. Детей рейпим в accept-цикле. */
 
     pid_t upd = fork();
     if (upd == 0) { background_updater(); _exit(0); }
@@ -1205,6 +1207,9 @@ int main(void) {
     printf("[INFO] Bot webhook listening on 0.0.0.0:%d (path /webhook)\n", port);
 
     for (;;) {
+        /* рейпим завершившихся детей-обработчиков webhook, не блокируясь */
+        while (waitpid(-1, NULL, WNOHANG) > 0) {}
+
         struct sockaddr_in ca;
         socklen_t clen = sizeof(ca);
         int client_fd = accept(server_fd, (struct sockaddr *)&ca, &clen);
