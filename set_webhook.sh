@@ -7,7 +7,7 @@
 # Токен берётся из переменной окружения BOT_TOKEN, либо из строки BOT_TOKEN= в .env
 set -e
 
-URL="${1:?Использование: $0 https://ИМЯ-ПРИЛОЖЕНИЯ.onrender.com}"
+URL="${1:?Использование: $0 https://sheets-server-c.onrender.com}"
 
 TOKEN="${BOT_TOKEN:-$(grep -E '^BOT_TOKEN=' .env 2>/dev/null | head -1 | cut -d= -f2-)}"
 if [ -z "$TOKEN" ]; then

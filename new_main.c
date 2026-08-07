@@ -1,0 +1,922 @@
+/*
+ * Telegram-бот на чистом C с webhook.
+ * Показывает график смен из Google Sheets в виде картинки PNG (ImageMagick + librsvg).
+ * Деплой: Docker на Render (Web Service).
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/wait.h>
+#include <sys/types.h>
+#include <time.h>
+#include <fcntl.h>
+#include <ctype.h>
+#include <stdarg.h>
+
+#define CACHE_TTL 60
+#define BUFFER_SIZE (512 * 1024)
+#define MAX_SHEETS 50
+#define MAX_SHEET_NAME 128
+#define MAX_MONTHS MAX_SHEETS
+#define MAX_CHATS 128
+#define MONTHS_FILE "/tmp/months.dat"
+#define SVG_FILE     "/tmp/month.svg"
+#define PNG_FILE     "/tmp/month.png"
+
+static const char *BOT_TOKEN;
+static const char *SPREADSHEET_ID;
+static const char *GOOGLE_API_KEY;
+static const char *FROM_COL;
+static const char *TO_COL;
+static const char *SEARCH_NAME;
+
+static void init_config(void) {
+    BOT_TOKEN      = getenv("BOT_TOKEN");
+    SPREADSHEET_ID = getenv("SPREADSHEET_ID");
+    GOOGLE_API_KEY = getenv("GOOGLE_API_KEY");
+    FROM_COL       = getenv("FROM_COL");
+    TO_COL         = getenv("TO_COL");
+    SEARCH_NAME    = getenv("SEARCH_NAME");
+}
+
+/* ================================================================
+ * curl через popen — загрузка URL в память
+ * ================================================================ */
+static char *fetch_url(const char *url) {
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "curl -sS --max-time 20 '%s' 2>&1", url);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp) { fprintf(stderr, "[diag] popen failed\n"); return NULL; }
+
+    char *buf = malloc(BUFFER_SIZE);
+    if (!buf) { pclose(fp); return NULL; }
+
+    size_t total = 0;
+    size_t n;
+    while ((n = fread(buf + total, 1, BUFFER_SIZE - total - 1, fp)) > 0) {
+        total += n;
+        if (total >= BUFFER_SIZE - 1) break;
+    }
+    buf[total] = '\0';
+
+    int status = pclose(fp);
+    if (status != 0) fprintf(stderr, "[diag] curl status=%d url=%s\n", status, url);
+    if (status != 0 || total == 0) {
+        if (total > 0) fprintf(stderr, "[diag] curl output: %.200s\n", buf);
+        free(buf);
+        return NULL;
+    }
+    return buf;
+}
+
+/* Запускает произвольную curl-команду, возвращает 0 при успехе (curl exit 0) */
+static int run_curl(const char *cmd) {
+    int status;
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return -1;
+    char sink[256];
+    while (fgets(sink, sizeof(sink), fp) != NULL) {}
+    status = pclose(fp);
+    if (status == -1) return -1;
+    return WEXITSTATUS(status);
+}
+
+/* ================================================================
+ * Утилиты для ручного разбора JSON по ключам (Google Sheets)
+ * ================================================================ */
+static const char *find_key_bounded(const char *json, size_t len, const char *key) {
+    char search[256];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *end = json + len;
+    const char *p = json;
+    while (p < end) {
+        const char *found = strstr(p, search);
+        if (!found || found >= end) return NULL;
+        const char *val = found + strlen(search);
+        while (val < end && *val && *val != ':') val++;
+        if (val < end && *val == ':') val++;
+        while (val < end && *val && (*val == ' ' || *val == '\t')) val++;
+        if (val < end) return val;
+        p = found + 1;
+    }
+    return NULL;
+}
+
+static char *extract_string(const char *pos) {
+    if (!pos || *pos != '"') return NULL;
+    pos++;
+    const char *end = pos;
+    while (*end && *end != '"') {
+        if (*end == '\\') end++;
+        end++;
+    }
+    int len = end - pos;
+    char *s = malloc(len + 1);
+    if (!s) return NULL;
+    memcpy(s, pos, len);
+    s[len] = '\0';
+    return s;
+}
+
+static int is_true(const char *pos) {
+    return (pos && strncmp(pos, "true", 4) == 0);
+}
+
+static char *url_encode(const char *src) {
+    size_t len = strlen(src);
+    char *dst = malloc(len * 3 + 1);
+    if (!dst) return NULL;
+    char *d = dst;
+    for (const unsigned char *s = (const unsigned char *)src; *s; s++) {
+        if ((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') ||
+            (*s >= '0' && *s <= '9') || *s == '-' || *s == '_' || *s == '.' || *s == '~') {
+            *d++ = *s;
+        } else {
+            d += sprintf(d, "%%%02X", *s);
+        }
+    }
+    *d = '\0';
+    return dst;
+}
+
+/* ================================================================
+ * Google Sheets: список видимых листов
+ * ================================================================ */
+static int get_visible_sheets(char sheets[][MAX_SHEET_NAME], int max_sheets) {
+    char url[1024];
+    snprintf(url, sizeof(url),
+        "https://sheets.googleapis.com/v4/spreadsheets/%s"
+        "?fields=sheets.properties(sheetId,title,hidden)&key=%s",
+        SPREADSHEET_ID, GOOGLE_API_KEY);
+
+    char *response = fetch_url(url);
+    if (!response) { fprintf(stderr, "[diag] google metadata fetch failed (curl/newtwork)\n"); return 0; }
+
+    int count = 0;
+    const char *p = response;
+
+    while ((p = strstr(p, "\"properties\"")) && count < max_sheets) {
+        p += 12;
+        while (*p && *p != '{') p++;
+        if (!*p) break;
+
+        const char *prop_start = p;
+        int brace = 1;
+        const char *prop_end = prop_start + 1;
+        while (*prop_end && brace > 0) {
+            if (*prop_end == '{') brace++;
+            if (*prop_end == '}') brace--;
+            prop_end++;
+        }
+        size_t prop_len = prop_end - prop_start;
+
+        const char *hidden_pos = find_key_bounded(prop_start, prop_len, "hidden");
+        if (hidden_pos && is_true(hidden_pos)) {
+            p = prop_end;
+            continue;
+        }
+
+        const char *title_pos = find_key_bounded(prop_start, prop_len, "title");
+        char *title = extract_string(title_pos);
+        if (title) {
+            strncpy(sheets[count], title, MAX_SHEET_NAME - 1);
+            sheets[count][MAX_SHEET_NAME - 1] = '\0';
+            free(title);
+            count++;
+        }
+
+        p = prop_end;
+    }
+
+    if (count == 0) fprintf(stderr, "[diag] google metadata head: %.300s\n", response);
+    free(response);
+    return count;
+}
+
+/* ================================================================
+ * Google Sheets: разбор JSON "values" (массив массивов строк)
+ * ================================================================ */
+static int extract_string_array(const char *pos, char ***out) {
+    if (!pos || *pos != '[') return 0;
+    pos++;
+
+    int cap = 16;
+    char **arr = malloc(sizeof(char *) * cap);
+    int count = 0;
+
+    while (*pos && *pos != ']') {
+        if (*pos == '"') {
+            char *s = extract_string(pos);
+            if (s) {
+                if (count >= cap) {
+                    cap *= 2;
+                    arr = realloc(arr, sizeof(char *) * cap);
+                }
+                arr[count++] = s;
+                pos++;
+                while (*pos && *pos != '"') {
+                    if (*pos == '\\') pos++;
+                    pos++;
+                }
+            }
+        }
+        if (*pos) pos++;
+    }
+
+    *out = arr;
+    return count;
+}
+
+static void free_string_array(char **arr, int count) {
+    for (int i = 0; i < count; i++) free(arr[i]);
+    free(arr);
+}
+
+/* Parse a JSON array of arrays (rows) from the "values" field. */
+static int parse_rows(const char *json, char ***rows_out, int **row_lens_out) {
+    if (!json) return 0;
+
+    const char *outer = strchr(json, '[');
+    if (!outer) return 0;
+    outer++;
+
+    int cap = 32;
+    char **rows = malloc(sizeof(char *) * cap);
+    int *lens = malloc(sizeof(int) * cap);
+    int count = 0;
+
+    while (*outer && *outer != ']') {
+        while (*outer && (*outer == ' ' || *outer == '\t' || *outer == '\n')) outer++;
+        if (!*outer || *outer == ']') break;
+
+        if (*outer == '[') {
+            char **arr = NULL;
+            int len = extract_string_array(outer, &arr);
+            if (len > 0) {
+                if (count >= cap) {
+                    cap *= 2;
+                    rows = realloc(rows, sizeof(char *) * cap);
+                    lens = realloc(lens, sizeof(int) * cap);
+                }
+                rows[count] = (char *)arr;
+                lens[count] = len;
+                count++;
+            } else {
+                free(arr);
+            }
+
+            int brace = 0;
+            while (*outer) {
+                if (*outer == '[') brace++;
+                if (*outer == ']') brace--;
+                outer++;
+                if (brace == 0) break;
+            }
+        } else {
+            outer++;
+        }
+    }
+
+    *rows_out = rows;
+    *row_lens_out = lens;
+    return count;
+}
+
+static void free_rows(char **rows, int *lens, int count) {
+    for (int i = 0; i < count; i++) {
+        free_string_array((char **)rows[i], lens[i]);
+    }
+    free(rows);
+    free(lens);
+}
+
+/* ================================================================
+ * Рекурсивный JSON-парсер в дерево (для Telegram update)
+ * ================================================================ */
+typedef struct JNode JNode;
+struct JNode {
+    int type;        /* 0 null, 1 bool, 2 num, 3 str, 4 arr, 5 obj */
+    int bval;
+    double num;
+    char *str;
+    JNode **items;
+    int nitems;
+    char **keys;
+    JNode **vals;
+    int nvals;
+};
+
+static int hexv(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 0;
+}
+
+static void utf8put(char **out, size_t *len, size_t *cap, unsigned cp) {
+    if (cp < 0x80) {
+        if (*len + 1 > *cap) { *cap *= 2; *out = realloc(*out, *cap); }
+        (*out)[(*len)++] = (char)cp;
+    } else if (cp < 0x800) {
+        if (*len + 2 > *cap) { *cap *= 2; *out = realloc(*out, *cap); }
+        (*out)[(*len)++] = (char)(0xC0 | (cp >> 6));
+        (*out)[(*len)++] = (char)(0x80 | (cp & 0x3F));
+    } else {
+        if (*len + 3 > *cap) { *cap *= 2; *out = realloc(*out, *cap); }
+        (*out)[(*len)++] = (char)(0xE0 | (cp >> 12));
+        (*out)[(*len)++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        (*out)[(*len)++] = (char)(0x80 | (cp & 0x3F));
+    }
+}
+
+static void jskip(const char **p) {
+    while (**p == ' ' || **p == '\t' || **p == '\n' || **p == '\r') (*p)++;
+}
+
+static char *jparse_string(const char **p) {
+    const char *s = *p;
+    if (*s != '"') return NULL;
+    s++;
+    size_t cap = 16, len = 0;
+    char *o = malloc(cap);
+    while (*s && *s != '"') {
+        if (*s == '\\') {
+            s++;
+            char c = *s;
+            switch (c) {
+                case 'n': c = '\n'; break;
+                case 't': c = '\t'; break;
+                case 'r': c = '\r'; break;
+                case 'b': c = '\b'; break;
+                case 'f': c = '\f'; break;
+                case '/': c = '/'; break;
+                case '\\': c = '\\'; break;
+                case '"': c = '"'; break;
+                case 'u': {
+                    unsigned cp = 0;
+                    s++;
+                    for (int i = 0; i < 4; i++) cp = (cp << 4) + hexv(s[i]);
+                    utf8put(&o, &len, &cap, cp);
+                    s += 4;
+                    continue;
+                }
+                default: s++; continue;
+            }
+            if (len + 1 > cap) { cap *= 2; o = realloc(o, cap); }
+            o[len++] = c;
+            s++;
+        } else {
+            if (len + 1 > cap) { cap *= 2; o = realloc(o, cap); }
+            o[len++] = *s;
+            s++;
+        }
+    }
+    if (*s == '"') s++;
+    o[len] = '\0';
+    *p = s;
+    return o;
+}
+
+static JNode *jvalue(const char **p);
+
+static JNode *jarray(const char **p) {
+    JNode *n = calloc(1, sizeof(JNode));
+    n->type = 4;
+    int cap = 4;
+    n->items = malloc(sizeof(JNode *) * cap);
+    (*p)++; /* '[' */
+    jskip(p);
+    while (**p && **p != ']') {
+        JNode *v = jvalue(p);
+        if (!v) break;
+        if (n->nitems >= cap) { cap *= 2; n->items = realloc(n->items, sizeof(JNode *) * cap); }
+        n->items[n->nitems++] = v;
+        jskip(p);
+        if (**p == ',') { (*p)++; jskip(p); }
+    }
+    if (**p == ']') (*p)++;
+    return n;
+}
+
+static JNode *jobject(const char **p) {
+    JNode *n = calloc(1, sizeof(JNode));
+    n->type = 5;
+    int cap = 4;
+    n->keys = malloc(sizeof(char *) * cap);
+    n->vals = malloc(sizeof(JNode *) * cap);
+    (*p)++; /* '{' */
+    jskip(p);
+    while (**p && **p != '}') {
+        char *k = jparse_string(p);
+        if (!k) break;
+        jskip(p);
+        if (**p == ':') (*p)++;
+        jskip(p);
+        JNode *v = jvalue(p);
+        if (!v) { free(k); break; }
+        if (n->nvals >= cap) {
+            cap *= 2;
+            n->keys = realloc(n->keys, sizeof(char *) * cap);
+            n->vals = realloc(n->vals, sizeof(JNode *) * cap);
+        }
+        n->keys[n->nvals] = k;
+        n->vals[n->nvals] = v;
+        n->nvals++;
+        jskip(p);
+        if (**p == ',') { (*p)++; jskip(p); }
+    }
+    if (**p == '}') (*p)++;
+    return n;
+}
+
+static JNode *jvalue(const char **p) {
+    jskip(p);
+    if (!**p) return NULL;
+    JNode *n;
+    if (**p == '{') return jobject(p);
+    if (**p == '[') return jarray(p);
+    if (**p == '"') {
+        n = calloc(1, sizeof(JNode));
+        n->type = 3;
+        n->str = jparse_string(p);
+        return n;
+    }
+    if (strncmp(*p, "true", 4) == 0) { *p += 4; n = calloc(1, sizeof(JNode)); n->type = 1; n->bval = 1; return n; }
+    if (strncmp(*p, "false", 5) == 0) { *p += 5; n = calloc(1, sizeof(JNode)); n->type = 1; return n; }
+    if (strncmp(*p, "null", 4) == 0) { *p += 4; n = calloc(1, sizeof(JNode)); n->type = 0; return n; }
+    n = calloc(1, sizeof(JNode));
+    n->type = 2;
+    n->num = strtod(*p, (char **)p);
+    return n;
+}
+
+static JNode *jparse(const char *json) {
+    const char *p = json;
+    JNode *root = jvalue(&p);
+    return root;
+}
+
+static void jfree(JNode *n) {
+    if (!n) return;
+    if (n->type == 3) free(n->str);
+    for (int i = 0; i < n->nitems; i++) jfree(n->items[i]);
+    free(n->items);
+    for (int i = 0; i < n->nvals; i++) { free(n->keys[i]); jfree(n->vals[i]); }
+    free(n->keys);
+    free(n->vals);
+    free(n);
+}
+
+/* Находит узел по пути через точки, напр. "message.chat.id" */
+static JNode *jfind(JNode *root, const char *path) {
+    if (!root || !path) return NULL;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", path);
+    JNode *cur = root;
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, ".", &save); tok; tok = strtok_r(NULL, ".", &save)) {
+        if (cur->type != 5) return NULL;
+        JNode *next = NULL;
+        for (int i = 0; i < cur->nvals; i++) {
+            if (strcmp(cur->keys[i], tok) == 0) { next = cur->vals[i]; break; }
+        }
+        if (!next) return NULL;
+        cur = next;
+    }
+    return cur;
+}
+
+static const char *jstr(JNode *n) {
+    return (n && n->type == 3 && n->str) ? n->str : NULL;
+}
+
+static long long jll(JNode *n) {
+    return (n && n->type == 2) ? (long long)n->num : 0;
+}
+
+/* ================================================================
+ * Гибкий парсер месяца из названия листа
+ * ================================================================ */
+static const char *ru_long[]   = {"январь","февраль","март","апрель","май","июнь","июль","август","сентябрь","октябрь","ноябрь","декабрь"};
+static const char *ru_gen[]    = {"января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"};
+static const char *ru_short[]  = {"янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"};
+static const char *en_long[]   = {"january","february","march","april","may","june","july","august","september","october","november","december"};
+static const char *en_short[]  = {"jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"};
+
+/* Переводит строку в нижний регистр с корректной обработкой UTF-8 кириллицы.
+   (tolower не работает с многобайтовыми символами). */
+static int lower_utf8(char *dst, size_t dstcap, const char *src) {
+    size_t j = 0;
+    const unsigned char *p = (const unsigned char *)src;
+    while (*p && j < dstcap - 1) {
+        if (p[0] == 0xD0 && p[1] >= 0x90 && p[1] <= 0x9F) {   /* А-П -> а-п */
+            dst[j++] = 0xD0;
+            dst[j++] = (char)(p[1] + 0x20);
+            p += 2;
+        } else if (p[0] == 0xD0 && p[1] >= 0xA0 && p[1] <= 0xAF) { /* Р-Я -> р-я */
+            dst[j++] = 0xD1;
+            dst[j++] = (char)(p[1] - 0x20);
+            p += 2;
+        } else if (p[0] == 0xD0 && p[1] == 0x81) {            /* Ё -> ё */
+            dst[j++] = 0xD1;
+            dst[j++] = 0x91;
+            p += 2;
+        } else {
+            dst[j++] = (char)tolower(*p);
+            p++;
+        }
+    }
+    dst[j] = '\0';
+    return 1;
+}
+
+static int detect_month_name(const char *t) {
+    for (int m = 0; m < 12; m++) {
+        if (strstr(t, ru_long[m]) || strstr(t, ru_gen[m]) || strstr(t, ru_short[m]) ||
+            strstr(t, en_long[m]) || strstr(t, en_short[m])) return m + 1;
+    }
+    return 0;
+}
+
+static int find_year_in(const char *s, int *year) {
+    int best = -1;
+    for (const char *p = s; *p; p++) {
+        if (isdigit((unsigned char)*p)) {
+            char *end;
+            long v = strtol(p, &end, 10);
+            int len = (int)(end - p);
+            if (v >= 2000 && v <= 2100) { best = (int)v; p = end - 1; }
+            else if (v >= 20 && v <= 99 && len == 2) { best = 2000 + (int)v; }
+        }
+    }
+    if (best >= 0) { *year = best; return 1; }
+    return 0;
+}
+
+static int detect_month_numeric(const char *t, int *year_out) {
+    for (const char *p = t; *p; p++) {
+        if (isdigit((unsigned char)*p)) {
+            char *e; long a = strtol(p, &e, 10);
+            const char *q = e;
+            if (*q == '.' || *q == '/' || *q == '-') {
+                q++;
+                if (isdigit((unsigned char)*q)) {
+                    char *e2; long b = strtol(q, &e2, 10);
+                    if (a >= 1 && a <= 12 && (b >= 1000 || (b >= 20 && b <= 99))) {
+                        int y = (int)b; if (y < 2000) y += 2000;
+                        *year_out = y; return (int)a;
+                    }
+                    if (a >= 2000 && a <= 2100 && b >= 1 && b <= 12) {
+                        *year_out = (int)a; return (int)b;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/* Парсит заголовок листа в (год, месяц 1-12). Возвращает 1 при успехе. */
+static int parse_month_title(const char *title, int *year, int *month) {
+    if (!title || !*title) return 0;
+    static char lower[512];
+    lower_utf8(lower, sizeof(lower), title);
+    const char *t = lower;
+
+    int y = -1, m = 0;
+    int y2 = -1;
+    int m2 = detect_month_numeric(t, &y2);
+    if (m2) { m = m2; y = y2; }
+    int mm = detect_month_name(t);
+    if (mm) m = mm;
+    int y3;
+    if (find_year_in(t, &y3)) y = y3;
+
+    if (!m) return 0;
+    if (y < 0) {
+        time_t now = time(NULL);
+        struct tm *lt = localtime(&now);
+        y = lt->tm_year + 1900;
+    }
+    *year = y;
+    *month = m;
+    return 1;
+}
+
+/* ================================================================
+ * Данные по месяцам
+ * ================================================================ */
+typedef struct {
+    int year;
+    int month;             /* 1-12 */
+    char title[MAX_SHEET_NAME];
+    char **shift1; int shift1_len;
+    char **shift2; int shift2_len;
+} MonthEntry;
+
+static char **copy_row(char **src, int len) {
+    char **out = malloc(sizeof(char *) * (len > 0 ? len : 1));
+    for (int i = 0; i < len; i++) out[i] = src[i] ? strdup(src[i]) : NULL;
+    return out;
+}
+
+/* Собирает данные каждого видимого листа(=месяца) в массив. Возвращает кол-во. */
+static int build_months(MonthEntry *out, int max) {
+    char sheets[MAX_SHEETS][MAX_SHEET_NAME];
+    int sheet_count = get_visible_sheets(sheets, MAX_SHEETS);
+    fprintf(stderr, "[updater] visible sheets=%d SEARCH_NAME='%s'\n", sheet_count, SEARCH_NAME ? SEARCH_NAME : "");
+    int count = 0;
+
+    for (int i = 0; i < sheet_count && count < max; i++) {
+        char range[256];
+        snprintf(range, sizeof(range), "%s!%s:%s", sheets[i], FROM_COL, TO_COL);
+
+        char *encoded_range = url_encode(range);
+        char url[2048];
+        snprintf(url, sizeof(url),
+            "https://sheets.googleapis.com/v4/spreadsheets/%s/values/%s?key=%s",
+            SPREADSHEET_ID, encoded_range, GOOGLE_API_KEY);
+        free(encoded_range);
+
+        char *response = fetch_url(url);
+        if (!response) continue;
+
+        const char *values_pos = strstr(response, "\"values\"");
+        if (!values_pos) { free(response); continue; }
+
+        char **rows = NULL;
+        int *row_lens = NULL;
+        int row_count = parse_rows(values_pos, &rows, &row_lens);
+        if (row_count == 0) { free(response); continue; }
+
+        int found_idx = -1;
+        for (int r = 0; r < row_count; r++) {
+            char **row = (char **)rows[r];
+            int rlen = row_lens[r];
+            if (rlen > 0 && row[0] && strcmp(row[0], SEARCH_NAME) == 0) {
+                found_idx = r;
+                break;
+            }
+        }
+        if (found_idx < 0) { free_rows(rows, row_lens, row_count); free(response); continue; }
+
+        MonthEntry *m = &out[count];
+        memset(m, 0, sizeof(MonthEntry));
+
+        int y, mo;
+        if (!parse_month_title(sheets[i], &y, &mo)) {
+            free_rows(rows, row_lens, row_count); free(response); continue;
+        }
+        m->year = y;
+        m->month = mo;
+        strncpy(m->title, sheets[i], MAX_SHEET_NAME - 1);
+        m->title[MAX_SHEET_NAME - 1] = '\0';
+
+        m->shift1 = copy_row((char **)rows[found_idx], row_lens[found_idx]);
+        m->shift1_len = row_lens[found_idx];
+        if (found_idx + 1 < row_count) {
+            m->shift2 = copy_row((char **)rows[found_idx + 1], row_lens[found_idx + 1]);
+            m->shift2_len = row_lens[found_idx + 1];
+        }
+
+        free_rows(rows, row_lens, row_count);
+        free(response);
+        count++;
+    }
+    return count;
+}
+
+static void fwstr(FILE *fp, const char *s) {
+    int len = s ? (int)strlen(s) : 0;
+    fwrite(&len, sizeof(int), 1, fp);
+    if (len) fwrite(s, 1, len, fp);
+}
+
+static void fwrow(FILE *fp, char **row, int len) {
+    fwrite(&len, sizeof(int), 1, fp);
+    for (int i = 0; i < len; i++) fwstr(fp, row[i]);
+}
+
+static int save_months(MonthEntry *mo, int count) {
+    FILE *fp = fopen(MONTHS_FILE, "wb");
+    if (!fp) return -1;
+    fwrite(&count, sizeof(int), 1, fp);
+    for (int i = 0; i < count; i++) {
+        fwrite(&mo[i].year, sizeof(int), 1, fp);
+        fwrite(&mo[i].month, sizeof(int), 1, fp);
+        fwstr(fp, mo[i].title);
+        fwrow(fp, mo[i].shift1, mo[i].shift1_len);
+        fwrow(fp, mo[i].shift2, mo[i].shift2_len);
+    }
+    fclose(fp);
+    return 0;
+}
+
+static int frstr(FILE *fp, char **out) {
+    int len;
+    if (fread(&len, sizeof(int), 1, fp) != 1) return -1;
+    char *s = malloc(len + 1);
+    if (len && fread(s, 1, len, fp) != (size_t)len) { free(s); return -1; }
+    s[len] = '\0';
+    *out = s;
+    return 0;
+}
+
+static int frrow(FILE *fp, char ***out) {
+    int len;
+    if (fread(&len, sizeof(int), 1, fp) != 1) return -1;
+    char **row = malloc(sizeof(char *) * (len > 0 ? len : 1));
+    for (int i = 0; i < len; i++) {
+        char *s = NULL;
+        if (frstr(fp, &s) < 0) {
+            for (int k = 0; k < i; k++) free(row[k]);
+            free(row);
+            return -1;
+        }
+        row[i] = s;
+    }
+    *out = row;
+    return len;
+}
+
+static int read_months(MonthEntry *mo, int max) {
+    FILE *fp = fopen(MONTHS_FILE, "rb");
+    if (!fp) return 0;
+    int count;
+    if (fread(&count, sizeof(int), 1, fp) != 1) { fclose(fp); return 0; }
+    if (count > max) count = max;
+    int got = 0;
+    for (int i = 0; i < count; i++) {
+        MonthEntry *m = &mo[i];
+        memset(m, 0, sizeof(MonthEntry));
+        char *title = NULL;
+        if (fread(&m->year, sizeof(int), 1, fp) != 1) break;
+        if (fread(&m->month, sizeof(int), 1, fp) != 1) break;
+        if (frstr(fp, &title) < 0) break;
+        strncpy(m->title, title ? title : "", MAX_SHEET_NAME - 1);
+        m->title[MAX_SHEET_NAME - 1] = '\0';
+        free(title);
+        int l1 = frrow(fp, &m->shift1);
+        if (l1 < 0) break;
+        m->shift1_len = l1;
+        int l2 = frrow(fp, &m->shift2);
+        if (l2 < 0) break;
+        m->shift2_len = l2;
+        got++;
+    }
+    fclose(fp);
+    return got;
+}
+
+static int cmp_month(const void *a, const void *b) {
+    const MonthEntry *x = a, *y = b;
+    if (x->year != y->year) return x->year - y->year;
+    return x->month - y->month;
+}
+
+
+/* ================================================================
+ * Динамический буфер (для построения JSON)
+ * ================================================================ */
+typedef struct { char *p; size_t len; size_t cap; } StrB;
+
+static void sb_init(StrB *b, size_t cap) { b->p = malloc(cap); b->len = 0; b->cap = cap; b->p[0] = '\0'; }
+
+static void sb_printf(StrB *b, const char *fmt, ...) {
+    for (;;) {
+        va_list a;
+        va_start(a, fmt);
+        int need = vsnprintf(b->p + b->len, b->cap - b->len, fmt, a);
+        va_end(a);
+        if (need < 0) return;
+        if ((size_t)need < b->cap - b->len) { b->len += need; return; }
+        b->cap += (size_t)need * 2 + 1;
+        b->p = realloc(b->p, b->cap);
+    }
+}
+
+static void sb_put(StrB *b, const char *s) { sb_printf(b, "%s", s); }
+
+static char *json_escape(const char *s) {
+    size_t cap = strlen(s ? s : "") * 2 + 16, len = 0;
+    char *o = malloc(cap);
+    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; p++) {
+        if (len + 6 > cap) { cap *= 2; o = realloc(o, cap); }
+        if (*p == '"' || *p == '\\') { o[len++] = '\\'; o[len++] = *p; }
+        else if (*p == '\n') { o[len++] = '\\'; o[len++] = 'n'; }
+        else if (*p == '\r') { o[len++] = '\\'; o[len++] = 'r'; }
+        else o[len++] = *p;
+    }
+    o[len] = '\0';
+    return o;
+}
+
+static int pick_current_index(MonthEntry *mo, int count) {
+    if (count <= 0) return -1;
+    time_t now = time(NULL);
+    struct tm *lt = localtime(&now);
+    int cy = lt->tm_year + 1900, cm = lt->tm_mon + 1;
+    for (int i = 0; i < count; i++)
+        if (mo[i].year == cy && mo[i].month == cm) return i;
+    int best = -1;
+    for (int i = 0; i < count; i++)
+        if (mo[i].year < cy || (mo[i].year == cy && mo[i].month < cm)) best = i;
+    if (best >= 0) return best;
+    return 0;
+}
+
+/* ================================================================
+ * JSON API: /api/months — данные всех месяцев для Mini App
+ * ================================================================ */
+static char *months_json(void) {
+    MonthEntry mo[MAX_MONTHS];
+    memset(mo, 0, sizeof(mo));
+    int count = read_months(mo, MAX_MONTHS);
+    qsort(mo, count, sizeof(MonthEntry), cmp_month);
+    int cur = pick_current_index(mo, count);
+
+    StrB b;
+    sb_init(&b, 16384);
+    sb_put(&b, "{\"current\":");
+    sb_printf(&b, "%d,\"months\":[", cur);
+    for (int i = 0; i < count; i++) {
+        if (i) sb_put(&b, ",");
+        char *t = json_escape(mo[i].title);
+        sb_printf(&b, "{\"y\":%d,\"m\":%d,\"t\":\"%s\",\"r1\":[", mo[i].year, mo[i].month, t);
+        free(t);
+        for (int k = 0; k < mo[i].shift1_len; k++) {
+            if (k) sb_put(&b, ",");
+            char *e = json_escape(mo[i].shift1[k] ? mo[i].shift1[k] : "");
+            sb_printf(&b, "\"%s\"", e); free(e);
+        }
+        sb_put(&b, "],\"r2\":[");
+        for (int k = 0; k < mo[i].shift2_len; k++) {
+            if (k) sb_put(&b, ",");
+            char *e = json_escape(mo[i].shift2[k] ? mo[i].shift2[k] : "");
+            sb_printf(&b, "\"%s\"", e); free(e);
+        }
+        sb_put(&b, "]}");
+    }
+    sb_put(&b, "]}");
+    return b.p;
+}
+
+/* ================================================================
+ * Telegram: отправка кнопки открытия Mini App
+ * ================================================================ */
+static const char *APP_URL;
+
+static void tg_send_text(long long chat_id, const char *text) {
+    char cmd[8192];
+    snprintf(cmd, sizeof(cmd),
+        "curl -sS --max-time 20 --data-urlencode 'chat_id=%lld' "
+        "--data-urlencode 'text=%s' "
+        "https://api.telegram.org/bot%s/sendMessage",
+        chat_id, text, BOT_TOKEN);
+    run_curl(cmd);
+}
+
+/* Присылает сообщение с inline-кнопкой web_app, открывающей Mini App.
+   JSON для кнопки пишем в файл и отдаём curl через reply_markup=<file,
+   чтобы избежать проблем с экранированием кавычек в shell. */
+static void tg_open(long long chat_id) {
+    char *u = json_escape(APP_URL ? APP_URL : "");
+    StrB b;
+    sb_init(&b, 512);
+    sb_put(&b, "{\"inline_keyboard\":[[{\"text\":\"📅 Открыть график\",\"web_app\":{\"url\":\"");
+    sb_put(&b, u);
+    sb_put(&b, "\"}}]]}");
+    free(u);
+    FILE *f = fopen("/tmp/reply_markup.json", "w");
+    if (f) { fputs(b.p, f); fclose(f); }
+    free(b.p);
+
+    char cmd[8192];
+    snprintf(cmd, sizeof(cmd),
+        "curl -sS --max-time 20 "
+        "-F 'chat_id=%lld' "
+        "-F 'text=Открой график смен во встроенном приложении 👇' "
+        "-F 'reply_markup=</tmp/reply_markup.json' "
+        "https://api.telegram.org/bot%s/sendMessage",
+        chat_id, BOT_TOKEN);
+    run_curl(cmd);
+}
+
+static void process_update(const char *body) {
+    JNode *root = jparse(body);
+    if (!root) return;
+
+    JNode *msg = jfind(root, "message");
+    if (msg && jfind(root, "message.chat.id")) {
+        long long cid = jll(jfind(root, "message.chat.id"));
+        if (APP_URL && *APP_URL) tg_open(cid);
+        else tg_send_text(cid, "Mini App не настроен: задайте APP_URL в окружении.");
+    }
+    jfree(root);
+}
