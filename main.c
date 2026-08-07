@@ -979,39 +979,49 @@ static void url_decode(char *dst, size_t dstcap, const char *src) {
  * Mini App: HTML + API
  * ================================================================ */
 static void serve_miniapp(int fd) {
-    const char html[] =
+    const char html_prefix[] =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'>"
         "<title>График смен</title>"
-        "<style>"
-        "body{margin:0;font-family:DejaVu Sans,Arial,sans-serif;background:#f5f5f5}"
-        ".c{padding:10px}"
-        ".m{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}"
-        ".b{padding:8px 12px;border:none;border-radius:6px;background:#4CAF50;color:#fff;font-size:14px;cursor:pointer}"
-        ".b.a{background:#2E7D32}"
-        ".t{overflow-x:auto;background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1)}"
-        "table{border-collapse:collapse;width:100%;min-width:520px}"
-        "th,td{border:1px solid #e0e0e0;padding:8px;text-align:center;font-size:14px}"
-        "thead th{background:#4CAF50;color:#fff;font-weight:bold}"
-        "tbody tr:nth-child(even){background:#f9f9f9}"
-        ".n{font-weight:bold;background:#f1f8e9;min-width:180px}"
-        ".x{display:flex;gap:8px;margin-top:12px}"
-        ".x button{flex:1;padding:10px;border:none;border-radius:6px;background:#4CAF50;color:#fff;font-size:16px;cursor:pointer}"
-        ".h{display:none}"
-        "</style></head><body><div class='c'><div id='months' class='m'></div>"
+        "<script>"
+        "function esc(s){if(!s)return '';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}"
+        "function showTable(d){"
+        "var w=document.getElementById('table');if(!w)return;"
+        "var s1=d.s1||[];var s2=d.s2||[];var n=Math.max(s1.length,s2.length,1);"
+        "var h='<table><thead><tr>';h+='<th>'+esc(d.t)+'</th>';"
+        "for(var i=0;i<n;i++){h+='<th>'+(i===n-1?'Смен':i)+'</th>';}"
+        "h+='</tr></thead><tbody>';"
+        "h+='<tr><td class=\"n\">'+esc('%NAME%')+'</td>';"
+        "for(var i=0;i<n;i++)h+='<td>'+esc(s1[i]||'')+'</td>';"
+        "h+='</tr><tr><td></td>';"
+        "for(var i=0;i<n;i++)h+='<td>'+esc(s2[i]||'')+'</td>';"
+        "h+='</tr></tbody></table>';"
+        "w.innerHTML=h;w.classList.remove('h');document.getElementById('nav').classList.remove('h');"
+        "}"
+        "function load(i){"
+        "var data={t:'Октябрь 2026',s1:['Бинкевич Татьяна Эдуардовна','7:30-14:40','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','0'],s2:['','15:10-21:00','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','','']};"
+        "showTable(data);"
+        "}"
+        "function init(){"
+        "document.getElementById('hello').textContent='JS работает';"
+        "load(0);"
+        "}"
+        "</script>"
+        "</head><body onload='init()'>"
+        "<div class='c'><div id='months' class='m'></div>"
         "<div id='table' class='t h'></div><div id='nav' class='x h'>"
         "<button id='prev'>◀ Назад</button><button id='next'>Вперёд ▶</button>"
-        "</div><div id='dbg' style='padding:8px;color:#c00;font-size:12px'></div>"
-        "<p style='padding:10px;font-size:18px;color:#006400'>Если ты видишь этот текст — HTML работает.</p>"
-        "<p style='padding:10px;font-size:14px;color:#c00'>Если видишь белый экран — Telegram блокирует выполнение JS или страница не загружается полностью.</p>"
+        "</div>"
+        "<p id='hello' style='padding:10px;font-size:18px;color:#006400'>Загрузка...</p>"
+        "<p style='padding:10px;font-size:14px;color:#c00'>Если видишь белый экран — Telegram блокирует выполнение JS.</p>"
         "</div></body></html>";
 
     char header[256];
     int hlen = snprintf(header, sizeof(header),
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
-        sizeof(html) - 1);
+        sizeof(html_prefix) - 1);
     write(fd, header, hlen);
-    write(fd, html, sizeof(html) - 1);
+    write(fd, html_prefix, sizeof(html_prefix) - 1);
 }
 
 static void http_reply(int fd, const char *status, const char *body) {
