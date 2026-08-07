@@ -973,6 +973,8 @@ static void serve_miniapp(int fd) {
         ".c{padding:10px}"
         ".m{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}"
         ".b{padding:8px 12px;border:none;border-radius:6px;background:var(--head);color:var(--head-fg);font-size:14px;cursor:pointer}"
+        ".b:hover{opacity:.85}"
+        ".b.active{outline:3px solid #FF9800;outline-offset:2px;background:#FF9800;color:#fff;font-weight:600}"
         ".t{overflow-x:auto;background:var(--card);border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1)}"
         "table{border-collapse:collapse;width:100%;min-width:520px}"
         "th,td{border:1px solid var(--border);padding:8px;text-align:center;font-size:14px}"
@@ -1009,6 +1011,7 @@ static void serve_miniapp(int fd) {
         "var M=[];var cur=-1;"
         "function load(i){"
         "cur=i;showMonths();"
+        "var el=document.getElementById('hello');if(el)el.textContent=M[i]||'Нет данных';"
         "var xhr=new XMLHttpRequest();"
         "xhr.open('GET','/api/month?name='+encodeURIComponent(M[i]),true);"
         "xhr.onreadystatechange=function(){"
@@ -1031,7 +1034,6 @@ static void serve_miniapp(int fd) {
         "if(xhr.readyState===4){"
         "if(xhr.status===200){"
         "try{var d=JSON.parse(xhr.responseText);M=d.months||[];"
-        "document.getElementById('hello').textContent='JS работает';"
         "if(M.length)load(M.length-1);else document.getElementById('hello').textContent='Нет данных';"
         "}catch(e){document.getElementById('hello').textContent='Ошибка JSON';}"
         "}else{document.getElementById('hello').textContent='Ошибка сети '+xhr.status;}"
@@ -1044,7 +1046,7 @@ static void serve_miniapp(int fd) {
         "</head><body onload='init()'>"
         "<div class='c'><div id='months' class='m'></div>"
         "<div id='table' class='t h'></div>"
-        "<p id='hello' style='padding:10px;font-size:18px;color:#006400'>Загрузка...</p>"
+        "<p id='hello' style='padding:14px;font-weight:600;font-size:20px;color:var(--text)'></p>"
         "</div></body></html>";
 
     char header[256];
