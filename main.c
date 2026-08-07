@@ -804,7 +804,7 @@ static char *json_escape(const char *s) {
     return o;
 }
 
-static void tg_send_web_app(long long chat_id, const char *url);
+static void set_chat_menu_button(void);
 
 static void tg_send_text(long long chat_id, const char *text) {
     char cmd[8192];
@@ -886,9 +886,7 @@ static void show_index(long long cid, int idx, MonthEntry *mo, int count) {
 
 static const char HELP_MSG[] =
     "Привет! Я бот-график смен.\n\n"
-    "Команды:\n"
-    "/график или /schedule — показать последний лист\n"
-    "Под ним кнопки ◀ / ▶ — листать листы.";
+    "Открывай график через кнопку меню чата 📅";
 
 /* ================================================================
  * Обработка Telegram-update
@@ -907,22 +905,7 @@ static void process_update(const char *body) {
             for (int i = 0; text[i] && j < 1022; i++) low[j++] = (char)tolower((unsigned char)text[i]);
             low[j] = '\0';
 
-            MonthEntry mo[MAX_MONTHS];
-            memset(mo, 0, sizeof(mo));
-            int count = read_months(mo, MAX_MONTHS);
-
-            if (strstr(low, "график") || strstr(low, "schedule") || strstr(low, "расписан")) {
-                int ci = pick_current_index(mo, count);
-                int gi = get_chat(cid);
-                if (gi >= 0) chats[gi].idx = ci;
-                if (MINIAPP_URL && *MINIAPP_URL) {
-                    tg_send_web_app(cid, MINIAPP_URL);
-                } else {
-                    show_index(cid, ci, mo, count);
-                }
-            } else {
-                tg_send_text(cid, HELP_MSG);
-            }
+            tg_send_text(cid, HELP_MSG);
         }
         jfree(root);
         return;
@@ -1160,15 +1143,18 @@ static void api_month(int fd, const char *query) {
 }
 
 /* Отправляет web_app кнопку */
-static void tg_send_web_app(long long chat_id, const char *url) {
-    char *eu = json_escape(url);
+/* Устанавливает кнопку меню чата (кнопка в строке ввода Telegram),
+   которая открывает Mini App без промежуточных шагов. */
+static void set_chat_menu_button(void) {
+    if (!MINIAPP_URL || !*MINIAPP_URL) return;
+    char *eu = json_escape(MINIAPP_URL);
     char cmd[8192];
     snprintf(cmd, sizeof(cmd),
         "curl -sS --max-time 20 -X POST "
         "-H 'Content-Type: application/json' "
-        "-d '{\"chat_id\":%lld,\"text\":\"Открыть график\",\"reply_markup\":{\"inline_keyboard\":[[{\"text\":\"\\uD83D\\uDCC5 График смен\",\"web_app\":{\"url\":\"%s\"}}]]}}' "
-        "https://api.telegram.org/bot%s/sendMessage",
-        chat_id, eu, BOT_TOKEN);
+        "-d '{\"menu_button\":{\"type\":\"web_app\",\"text\":\"\\uD83C\\uDFD5 График\",\"web_app\":{\"url\":\"%s\"}}}' "
+        "https://api.telegram.org/bot%s/setChatMenuButton",
+        eu, BOT_TOKEN);
     run_curl(cmd);
     free(eu);
 }
@@ -1280,6 +1266,9 @@ int main(void) {
         if (!SEARCH_NAME)    fprintf(stderr, "  - SEARCH_NAME\n");
         return 1;
     }
+
+    /* Устанавливаем кнопку меню чата, которая открывает Mini App одним кликом */
+    set_chat_menu_button();
 
     /* ВАЖНО: НЕ игнорируем SIGCHLD — на Linux это ломает waitpid() внутри
        pclose() для popen/curl: pclose вернёт -1, и все fetch_url будут
