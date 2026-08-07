@@ -979,13 +979,10 @@ static void url_decode(char *dst, size_t dstcap, const char *src) {
  * Mini App: HTML + API
  * ================================================================ */
 static void serve_miniapp(int fd) {
-    const char html_prefix[] =
+    const char html[] =
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'>"
         "<title>График смен</title>"
-        "<script>/* Telegram WebApp SDK */"
-        "window.Telegram||(window.Telegram={WebApp:{expand:function(){},close:function(){},ready:function(){},MainButton:{}}})"
-        "</script>"
         "<style>"
         "body{margin:0;font-family:DejaVu Sans,Arial,sans-serif;background:#f5f5f5}"
         ".c{padding:10px}"
@@ -1005,47 +1002,16 @@ static void serve_miniapp(int fd) {
         "<div id='table' class='t h'></div><div id='nav' class='x h'>"
         "<button id='prev'>◀ Назад</button><button id='next'>Вперёд ▶</button>"
         "</div><div id='dbg' style='padding:8px;color:#c00;font-size:12px'></div>"
-        "<p id='hello' style='padding:10px;font-size:18px'>Загрузка...</p>"
-        "<script>document.getElementById('hello').textContent='Проверка JS...';</script>"
-        "</div><script>";
-    const char html_suffix[] =
-        "function dbg(msg){try{var d=document.getElementById('dbg');if(d)d.textContent=msg;console.log(msg);}catch(e){console.log(e);}}"
-        "function init(){try{dbg('init OK');document.getElementById('hello').textContent='JS работает';}catch(e){dbg('init ERR: '+e);document.getElementById('hello').textContent='Ошибка JS';}}"
-        "init();</script></body></html>";
-
-    /* Подставляем SEARCH_NAME в HTML (безопасно, без snprintf с %) */
-    size_t pre_len = sizeof(html_prefix) - 1;
-    size_t name_len = SEARCH_NAME ? strlen(SEARCH_NAME) : 0;
-    size_t suf_len = sizeof(html_suffix) - 1;
-    size_t total = pre_len + name_len + suf_len + 64;
-    char *buf = malloc(total);
-    if (!buf) return;
-    memcpy(buf, html_prefix, pre_len);
-    if (SEARCH_NAME) memcpy(buf + pre_len, SEARCH_NAME, name_len);
-    memcpy(buf + pre_len + name_len, html_suffix, suf_len);
-    buf[pre_len + name_len + suf_len] = '\0';
-
-    /* Заменяем плейсхолдер %NAME% внутри JS на реальное имя */
-    if (SEARCH_NAME && *SEARCH_NAME) {
-        char *ph = strstr(buf, "%NAME%");
-        if (ph) {
-            size_t nlen = strlen(SEARCH_NAME);
-            size_t plen = strlen("%NAME%");
-            size_t blen = pre_len + name_len + suf_len;
-            if (blen - plen + nlen + 1 < total) {
-                memmove(ph + nlen, ph + plen, blen - (ph - buf) - plen + 1);
-                memcpy(ph, SEARCH_NAME, nlen);
-            }
-        }
-    }
+        "<p style='padding:10px;font-size:18px;color:#006400'>Если ты видишь этот текст — HTML работает.</p>"
+        "<p style='padding:10px;font-size:14px;color:#c00'>Если видишь белый экран — Telegram блокирует выполнение JS или страница не загружается полностью.</p>"
+        "</div></body></html>";
 
     char header[256];
     int hlen = snprintf(header, sizeof(header),
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
-        strlen(buf));
+        sizeof(html) - 1);
     write(fd, header, hlen);
-    write(fd, buf, strlen(buf));
-    free(buf);
+    write(fd, html, sizeof(html) - 1);
 }
 
 static void http_reply(int fd, const char *status, const char *body) {
