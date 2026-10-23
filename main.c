@@ -1508,7 +1508,8 @@ static int handle_conn(int client_fd) {
         api_cabinet(client_fd, path);
         return 0;
     }
-    if (strncmp(path, "/api/tracking/", 14) == 0) {
+    if (strncmp(path, "/api/tracking/", 14) == 0 ||
+        strcmp(path, "/diag/tracking") == 0) {
         tracking_handle(client_fd, method, path, body);
         return 0;
     }
