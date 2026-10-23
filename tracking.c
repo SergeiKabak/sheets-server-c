@@ -695,7 +695,7 @@ static int sheets_append_row(const char *sheet_name, const char *values_json) {
     if (!enc_sheet) return -1;
     snprintf(url, sizeof(url),
         "%s/v4/spreadsheets/%s/values/%%27%s%%27!A:F:append"
-        "?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS",
+        "?valueInputOption=RAW&insertDataOption=INSERT_ROWS",
         g_api_base, g_sheet_id, enc_sheet);
     free(enc_sheet);
 
@@ -732,7 +732,7 @@ static int sheets_update_values_raw(const char *sheet_name, const char *a1_suffi
     if (!enc) return -1;
     snprintf(url, sizeof(url),
         "%s/v4/spreadsheets/%s/values/%%27%s%%27%s"
-        "?valueInputOption=USER_ENTERED",
+        "?valueInputOption=RAW",
         g_api_base, g_sheet_id, enc, a1_suffix);
     free(enc);
 
@@ -763,7 +763,7 @@ static int sheets_update_range(const char *sheet_name, const char *a1_suffix,
     if (!enc) return -1;
     snprintf(url, sizeof(url),
         "%s/v4/spreadsheets/%s/values/%%27%s%%27%s"
-        "?valueInputOption=USER_ENTERED",
+        "?valueInputOption=RAW",
         g_api_base, g_sheet_id, enc, a1_suffix);
     free(enc);
 
