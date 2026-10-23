@@ -25,6 +25,7 @@
 #define MAX_MONTHS MAX_SHEETS
 #define MAX_CHATS 128
 #define MONTHS_FILE "/tmp/months.dat"
+#define CABINET_INDEX_FILE "/tmp/cabinet_index.txt"
 #define SVG_FILE     "/tmp/month.svg"
 #define PNG_FILE     "/tmp/month.png"
 
@@ -600,6 +601,123 @@ static int save_months(MonthEntry *mo, int count) {
     return 0;
 }
 
+static char *json_escape(const char *s);
+
+/* Сохраняет текстовый индекс кабинетов: месяц\tday\tкабинет\тимя\tshift
+   Обновляется в background_updater вместе с месяцами. */
+static void save_cabinet_index(MonthEntry *mo, int count) {
+    FILE *fp = fopen(CABINET_INDEX_FILE, "w");
+    if (!fp) {
+        fprintf(stderr, "[cabinet] cannot open %s for writing\n", CABINET_INDEX_FILE);
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        const char *month = mo[i].title;
+        char **shifts[2] = { mo[i].shift1, mo[i].shift2 };
+        int lens[2] = { mo[i].shift1_len, mo[i].shift2_len };
+        for (int s = 0; s < 2; s++) {
+            char **row = shifts[s];
+            int len = lens[s];
+            if (!row || len < 3) continue;
+            const char *name = row[0] ? row[0] : "";
+            if (!*name) continue;
+            if (SEARCH_NAME && strcmp(name, SEARCH_NAME) == 0) continue;
+            const char *shift = row[1] ? row[1] : "";
+            for (int d = 2; d < len; d++) {
+                const char *cabinet = row[d] ? row[d] : "";
+                if (!*cabinet) continue;
+                int day = d - 1;
+                fprintf(fp, "%s\t%d\t%s\t%s\t%s\n", month, day, cabinet, name, shift);
+            }
+        }
+    }
+    fclose(fp);
+    fprintf(stderr, "[cabinet] index saved (%d months)\n", count);
+}
+
+/* Читает готовый индекс и возвращает JSON-массив коллег для месяца/дня/кабинета.
+   out должен быть буфером достаточного размера. Возвращает длину JSON. */
+static int find_cabinet_colleagues_from_index(const char *month, int day,
+                                              const char *cabinet,
+                                              const char *shift,
+                                              char *out, size_t outcap) {
+    FILE *fp = fopen(CABINET_INDEX_FILE, "r");
+    if (!fp) {
+        return snprintf(out, outcap, "[]");
+    }
+    int off = 0;
+    int first = 1;
+    char line[1024];
+    while (fgets(line, sizeof(line), fp)) {
+        char m[128] = "";
+        int d = 0;
+        char c[128] = "";
+        char name[256] = "";
+        char s[128] = "";
+        char *p = line;
+        // месяц
+        char *t = strchr(p, '\t');
+        if (!t) continue;
+        size_t l = t - p;
+        if (l >= sizeof(m)) l = sizeof(m) - 1;
+        memcpy(m, p, l); m[l] = '\0';
+        p = t + 1;
+        // день
+        t = strchr(p, '\t');
+        if (!t) continue;
+        l = t - p;
+        if (l >= 16) l = 15;
+        char ds[16] = "";
+        memcpy(ds, p, l); ds[l] = '\0';
+        d = atoi(ds);
+        p = t + 1;
+        // кабинет
+        t = strchr(p, '\t');
+        if (!t) continue;
+        l = t - p;
+        if (l >= sizeof(c)) l = sizeof(c) - 1;
+        memcpy(c, p, l); c[l] = '\0';
+        p = t + 1;
+        // имя
+        t = strchr(p, '\t');
+        if (!t) continue;
+        l = t - p;
+        if (l >= sizeof(name)) l = sizeof(name) - 1;
+        memcpy(name, p, l); name[l] = '\0';
+        p = t + 1;
+        // shift (до конца строки)
+        l = strlen(p);
+        while (l && (p[l-1] == '\n' || p[l-1] == '\r')) p[--l] = '\0';
+        if (l >= sizeof(s)) l = sizeof(s) - 1;
+        memcpy(s, p, l); s[l] = '\0';
+
+        if (strcmp(m, month) != 0) continue;
+        if (d != day) continue;
+        if (strcmp(c, cabinet) != 0) continue;
+        // фильтр по смене, если передана
+        if (shift && *shift && strcmp(s, shift) != 0) continue;
+
+        if (!first) {
+            off += snprintf(out + off, outcap - off, ",");
+        }
+        first = 0;
+        char *en = json_escape(name);
+        char *es = json_escape(s);
+        off += snprintf(out + off, outcap - off,
+            "{\"name\":\"%s\",\"shift\":\"%s\"}",
+            en ? en : name, es ? es : s);
+        free(en);
+        free(es);
+    }
+    fclose(fp);
+    off += snprintf(out + off, outcap - off, "]");
+    if (first) {
+        // пустой результат
+        off = snprintf(out, outcap, "[]");
+    }
+    return off;
+}
+
 static int frstr(FILE *fp, char **out) {
     int len;
     if (fread(&len, sizeof(int), 1, fp) != 1) return -1;
@@ -1149,11 +1267,12 @@ static void api_month(int fd, const char *query) {
 }
 
 /* Отдаёт JSON коллег по кабинету и дню:
-   GET /api/cabinet?month=...&cabinet=...&day=... */
+   GET /api/cabinet?month=...&cabinet=...&day=...&shift=7:30-14:40 */
 static void api_cabinet(int fd, const char *query) {
     const char *p_month = strstr(query, "month=");
     const char *p_cab   = strstr(query, "cabinet=");
     const char *p_day   = strstr(query, "day=");
+    const char *p_shift = strstr(query, "shift=");
     if (!p_month || !p_cab || !p_day) {
         http_reply(fd, "400 Bad Request", "{\"error\":\"missing params\"}");
         return;
@@ -1161,10 +1280,12 @@ static void api_cabinet(int fd, const char *query) {
     p_month += 6;
     p_cab   += 8;
     p_day   += 4;
+    if (p_shift) p_shift += 6;
 
     char tmp[512];
     char month[256] = "";
     char cabinet[128] = "";
+    char shift[128] = "";
     int day = 0;
 
     #define EXTRACT_PARAM(src, dst, dstcap) do { \
@@ -1177,6 +1298,7 @@ static void api_cabinet(int fd, const char *query) {
 
     EXTRACT_PARAM(p_month, month, sizeof(month));
     EXTRACT_PARAM(p_cab, cabinet, sizeof(cabinet));
+    if (p_shift) EXTRACT_PARAM(p_shift, shift, sizeof(shift));
 
     {
         const char *amp = strchr(p_day, '&');
@@ -1188,10 +1310,7 @@ static void api_cabinet(int fd, const char *query) {
     }
     #undef EXTRACT_PARAM
 
-    fprintf(stderr, "[cabinet] month='%s' cabinet='%s' day=%d\n", month, cabinet, day);
-
-    char sheets[MAX_SHEETS][MAX_SHEET_NAME];
-    int sheet_count = get_visible_sheets(sheets, MAX_SHEETS);
+    fprintf(stderr, "[cabinet] month='%s' cabinet='%s' day=%d shift='%s'\n", month, cabinet, day, shift);
 
     size_t cap = 65536;
     char *json = malloc(cap);
@@ -1205,61 +1324,12 @@ static void api_cabinet(int fd, const char *query) {
     char *em = json_escape(month);
     off += snprintf(json + off, cap - off, "%s", em ? em : month);
     free(em);
-    off += snprintf(json + off, cap - off, "\",\"day\":%d,\"colleagues\":[", day);
+    off += snprintf(json + off, cap - off, "\",\"day\":%d,\"shift\":\"%s\",\"colleagues\":[", day, shift);
 
-    int first = 1;
-    /* 0=имя, 1=смена, 2=день 1, ..., день N -> индекс 1+N */
-    int col = 1 + day;
+    int n = find_cabinet_colleagues_from_index(month, day, cabinet, shift[0] ? shift : NULL, json + off, cap - off);
+    off += n;
 
-    for (int i = 0; i < sheet_count; i++) {
-        char range[256];
-        snprintf(range, sizeof(range), "%s!%s:%s", sheets[i], FROM_COL, TO_COL);
-        char *encoded_range = url_encode(range);
-        char url[2048];
-        snprintf(url, sizeof(url),
-            "https://sheets.googleapis.com/v4/spreadsheets/%s/values/%s?key=%s",
-            SPREADSHEET_ID, encoded_range, GOOGLE_API_KEY);
-        free(encoded_range);
-
-        char *response = fetch_url(url);
-        if (!response) continue;
-
-        const char *values_pos = strstr(response, "\"values\"");
-        if (!values_pos) { free(response); continue; }
-
-        char **rows = NULL;
-        int *row_lens = NULL;
-        int row_count = parse_rows(values_pos, &rows, &row_lens);
-        if (row_count == 0) { free_rows(rows, row_lens, row_count); free(response); continue; }
-
-        for (int r = 0; r < row_count; r++) {
-            char **row = (char **)rows[r];
-            int rlen = row_lens[r];
-            if (rlen <= col || !row[col]) continue;
-            if (strcmp(row[col], cabinet) != 0) continue;
-
-            const char *name = row[0] ? row[0] : "";
-            if (SEARCH_NAME && strcmp(name, SEARCH_NAME) == 0) continue;
-
-            const char *shift = rlen > 1 && row[1] ? row[1] : "";
-
-            if (!first) {
-                off += snprintf(json + off, cap - off, ",");
-            }
-            first = 0;
-            char *en = json_escape(name);
-            char *es = json_escape(shift);
-            off += snprintf(json + off, cap - off,
-                "{\"name\":\"%s\",\"shift\":\"%s\"}",
-                en ? en : name, es ? es : shift);
-            free(en);
-            free(es);
-        }
-        free_rows(rows, row_lens, row_count);
-        free(response);
-    }
-
-    snprintf(json + off, cap - off, "]}");
+    snprintf(json + off, cap - off, "}");
 
     char hdr[256];
     int hlen = snprintf(hdr, sizeof(hdr),
@@ -1376,6 +1446,7 @@ static void background_updater(void) {
         memset(mo, 0, sizeof(mo));
         int c = build_months(mo, MAX_MONTHS);
         save_months(mo, c);
+        save_cabinet_index(mo, c);
         fprintf(stderr, "[updater] months cached: %d\n", c);
         sleep(CACHE_TTL);
     }
