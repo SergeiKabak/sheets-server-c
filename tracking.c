@@ -1296,6 +1296,10 @@ void tracking_handle(int fd, const char *method, const char *path, const char *b
         api_tracking_summary(fd, path);
         return;
     }
+    if (strcmp(path, "/diag/tracking") == 0) {
+        api_tracking_diag(fd, path);
+        return;
+    }
     trk_reply(fd, "404 Not Found", "{\"ok\":false,\"error\":\"not found\"}");
 }
 
@@ -1435,4 +1439,122 @@ static int tracking_ensure_spreadsheet(void) {
         }
     }
     return 0;
+}
+
+/* ==================================================================
+ *  Диагностика трекинга: /diag/tracking[?write=1]
+ * ================================================================== */
+static void api_tracking_diag(int fd, const char *query) {
+    size_t cap = 16384;
+    char *out = malloc(cap);
+    if (!out) { trk_reply(fd, "500 Internal Server Error", "{}"); return; }
+    size_t o = 0;
+
+    o += snprintf(out + o, cap - o, "{\"ok\":true");
+
+    /* 1) наличие Service Account */
+    o += snprintf(out + o, cap - o, ",\"sa_configured\":%s", g_sa_json ? "true" : "false");
+    if (g_sa_json) {
+        char *em = json_get_string(g_sa_json, "client_email");
+        char *ee = json_escape_local(em ? em : "");
+        o += snprintf(out + o, cap - o, ",\"sa_email\":\"%s\"", ee ? ee : "");
+        free(ee); free(em);
+    }
+
+    /* 2) получение access token */
+    const char *tok = sa_access_token();
+    o += snprintf(out + o, cap - o, ",\"token_ok\":%s", tok ? "true" : "false");
+
+    /* 3) таблица */
+    o += snprintf(out + o, cap - o, ",\"sheet_id\":\"%s\"",
+                  g_sheet_id ? g_sheet_id : "");
+
+    /* 4) список вкладок */
+    if (g_sheet_id && tok) {
+        char url[2048];
+        snprintf(url, sizeof(url), "%s/v4/spreadsheets/%s?fields=sheets.properties.title",
+                 g_api_base, g_sheet_id);
+        int status = 0;
+        char *resp = trk_curl("GET", url, NULL, NULL, tok, &status);
+        o += snprintf(out + o, cap - o, ",\"tabs\":[");
+        if (resp && status == 200) {
+            const char *p = resp;
+            int first = 1;
+            while ((p = strstr(p, "\"title\"")) != NULL) {
+                p = strchr(p, ':');
+                if (!p) break;
+                while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+                if (*p != '"') break;
+                p++;
+                const char *st = p;
+                while (*p && *p != '"') p++;
+                size_t len = (size_t)(p - st);
+                char *name = malloc(len + 1);
+                memcpy(name, st, len); name[len] = '\0';
+                char *ee = json_escape_local(name);
+                o += snprintf(out + o, cap - o, "%s\"%s\"", first ? "" : ",", ee ? ee : "");
+                free(ee); free(name);
+                first = 0;
+                p++;
+            }
+        }
+        o += snprintf(out + o, cap - o, "]");
+        free(resp);
+    }
+
+    /* 5) проверка чтения вкладки месяца */
+    char month[256];
+    current_month_name(month, sizeof(month));
+    o += snprintf(out + o, cap - o, ",\"month_tab\":\"%s\"", month);
+    if (g_sheet_id && tok) {
+        TRows rows;
+        memset(&rows, 0, sizeof(rows));
+        char *resp = sheets_get_values(month);
+        o += snprintf(out + o, cap - o, ",\"read_ok\":%s", resp ? "true" : "false");
+        if (resp) {
+            parse_values_json(resp, &rows);
+            o += snprintf(out + o, cap - o, ",\"rows\":%d", rows.count);
+            trows_free(&rows);
+            free(resp);
+        }
+    }
+
+    /* 6) пробная запись (только по явному запросу ?write=1) */
+    char *w = query_param(query, "write");
+    if (w && strcmp(w, "1") == 0 && g_sheet_id && tok) {
+        /* создаём вкладку месяца, если её нет, и пишем тестовую строку */
+        TRows rows;
+        memset(&rows, 0, sizeof(rows));
+        char *resp = sheets_get_values(month);
+        if (resp) { parse_values_json(resp, &rows); free(resp); }
+        else {
+            /* вкладки нет — создаём */
+            if (sheets_create_sheet(month) == 0) {
+                o += snprintf(out + o, cap - o, ",\"tab_created\":true");
+                static const char *HEAD[6] = {
+                    "Дата", "Время прихода", "Время ухода",
+                    "Время в часах", "Ставка в час", "Сумма за день"
+                };
+                char vals[6][64];
+                for (int c = 0; c < 6; c++) snprintf(vals[c], 64, "%s", HEAD[c]);
+                const char *ptr[6] = { vals[0],vals[1],vals[2],vals[3],vals[4],vals[5] };
+                char *hj = build_values_json(ptr);
+                if (hj) { sheets_update_range(month, "!A1:F1", hj); free(hj); }
+            }
+        }
+        trows_free(&rows);
+
+        char date[32], ts[16];
+        current_datetime(date, sizeof(date), ts, sizeof(ts));
+        const char *cells[6] = { date, ts, "", "", "500", "" };
+        int rc = append_row(cells);
+        o += snprintf(out + o, cap - o, ",\"write_ok\":%s", rc == 0 ? "true" : "false");
+        o += snprintf(out + o, cap - o, ",\"write_test\":{\"date\":\"%s\",\"time\":\"%s\"}",
+                      date, ts);
+    }
+    free(w);
+
+    o += snprintf(out + o, cap - o, "}");
+    trk_reply(fd, "200 OK", out);
+    free(out);
 }
