@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <fcntl.h>
+#include <stdarg.h>
 
 #define CACHE_TTL 60
 #define BUFFER_SIZE (512 * 1024)
@@ -21,12 +22,31 @@ static const char *FROM_COL;
 static const char *TO_COL;
 static const char *SEARCH_NAME;
 
+#define DEFAULT_FROM_COL "C"
+#define DEFAULT_TO_COL   "AJ"
+
+static void log_msg(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "[sheets] ");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+}
+
 static void init_config(void) {
     SPREADSHEET_ID = getenv("SPREADSHEET_ID");
     GOOGLE_API_KEY = getenv("GOOGLE_API_KEY");
     FROM_COL = getenv("FROM_COL");
     TO_COL = getenv("TO_COL");
     SEARCH_NAME = getenv("SEARCH_NAME");
+
+    if (!FROM_COL) FROM_COL = DEFAULT_FROM_COL;
+    if (!TO_COL)   TO_COL   = DEFAULT_TO_COL;
+
+    log_msg("config: SPREADSHEET_ID=%s FROM_COL=%s TO_COL=%s SEARCH_NAME=%s",
+            SPREADSHEET_ID ? SPREADSHEET_ID : "(null)",
+            FROM_COL, TO_COL, SEARCH_NAME ? SEARCH_NAME : "(null)");
 }
 
 static char *fetch_url(const char *url) {
@@ -261,7 +281,8 @@ static void free_rows(char **rows, int *lens, int count) {
 static void build_and_save_cache(void) {
     char sheets[MAX_SHEETS][MAX_SHEET_NAME];
     int sheet_count = get_visible_sheets(sheets, MAX_SHEETS);
-    
+    log_msg("build_and_save_cache: started, visible sheets=%d", sheet_count);
+
     size_t cap = 65536;
     char *html = malloc(cap);
     size_t len = 0;
@@ -295,7 +316,10 @@ static void build_and_save_cache(void) {
             free(encoded_range);
             
             char *response = fetch_url(url);
-            if (!response) continue;
+            if (!response) {
+                log_msg("build_and_save_cache: fetch failed for sheet '%s'", sheets[i]);
+                continue;
+            }
             
             const char *values_pos = strstr(response, "\"values\"");
             if (!values_pos) { free(response); continue; }
@@ -318,6 +342,7 @@ static void build_and_save_cache(void) {
             }
             
             if (found_idx < 0) {
+                log_msg("build_and_save_cache: name '%s' not found in sheet '%s'", SEARCH_NAME, sheets[i]);
                 free_rows(rows, row_lens, row_count);
                 free(response);
                 continue;
@@ -474,7 +499,24 @@ int main(void) {
         socklen_t client_len = sizeof(client_addr);
         int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
         if (client_fd < 0) continue;
-        
+
+        int force_refresh = 0;
+        {
+            char reqbuf[2048];
+            ssize_t n = read(client_fd, reqbuf, sizeof(reqbuf) - 1);
+            if (n > 0) {
+                reqbuf[n] = '\0';
+                if (strstr(reqbuf, "refresh=1") || strstr(reqbuf, "force=1")) {
+                    force_refresh = 1;
+                }
+            }
+        }
+
+        if (force_refresh) {
+            log_msg("HTTP: forced cache refresh requested");
+            build_and_save_cache();
+        }
+
         size_t html_len = 0;
         char *html = read_cache_file(&html_len);
         
