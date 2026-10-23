@@ -1021,6 +1021,7 @@ static int append_row(const char *const cells[6]) {
 }
 
 static int tracking_ensure_spreadsheet(void);
+static void api_tracking_diag(int fd, const char *query);
 
 /* Ответ клиенту */
 static void trk_reply(int fd, const char *status, const char *body) {
