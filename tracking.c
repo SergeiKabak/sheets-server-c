@@ -1648,6 +1648,10 @@ static int tracking_ensure_spreadsheet(void) {
         if (!g_last_error[0])
             snprintf(g_last_error, sizeof(g_last_error),
                      "cannot create spreadsheet (need Service Account with spreadsheets scope)");
+        if (strstr(g_last_error, "does not have permission"))
+            snprintf(g_last_error, sizeof(g_last_error),
+                     "Service Account cannot create spreadsheets. Set TRACKING_SHEET_ID "
+                     "to the existing Time tracking spreadsheet id.");
         trk_log("%s", g_last_error);
         return -1;
     }
@@ -1792,6 +1796,15 @@ static void api_tracking_diag(int fd, const char *query) {
         o += snprintf(out + o, cap - o,
             ",\"hint\":\"Share the Time tracking spreadsheet with the Service "
             "Account email as Editor.\"");
+    } else if (strstr(g_last_error, "does not have permission")) {
+        o += snprintf(out + o, cap - o,
+            ",\"hint\":\"Service Account cannot create new spreadsheets. "
+            "Set TRACKING_SHEET_ID to the existing Time tracking spreadsheet id "
+            "(1zhWZRFI6GYYnh6PNQn37KiSyPLvjkSwJz-CKwF0xEnw).\"");
+    } else if (!g_sheet_id[0]) {
+        o += snprintf(out + o, cap - o,
+            ",\"hint\":\"TRACKING_SHEET_ID is not set. Set it to the Time "
+            "tracking spreadsheet id so the server can read/write it.\"");
     }
 
     if (g_last_error[0]) {
