@@ -743,7 +743,10 @@ static int find_cabinet_colleagues_from_index(const char *month, int day,
             emitted++;
         }
 
-        if (!first) {
+        if (first) {
+            /* открываем JSON-массив */
+            off += snprintf(out + off, outcap - off, "[");
+        } else {
             off += snprintf(out + off, outcap - off, ",");
         }
         first = 0;
@@ -760,6 +763,7 @@ static int find_cabinet_colleagues_from_index(const char *month, int day,
         // пустой результат
         off = snprintf(out, outcap, "[]");
     } else {
+        // закрываем JSON-массив
         off += snprintf(out + off, outcap - off, "]");
     }
     return off;
@@ -1462,6 +1466,39 @@ static int handle_conn(int client_fd) {
         api_cabinet(client_fd, path);
         return 0;
     }
+    if (strcmp(path, "/diag/cabinet") == 0) {
+        /* Диагностика индекса кабинетов: количество строк и пример */
+        FILE *fp = fopen(CABINET_INDEX_FILE, "r");
+        if (!fp) {
+            http_reply(client_fd, "503 Service Unavailable",
+                       "{\"error\":\"index not ready\"}");
+            return 0;
+        }
+        long lines = 0;
+        char ln[1024];
+        char sample[3072] = "";
+        int si = 0;
+        while (fgets(ln, sizeof(ln), fp)) {
+            lines++;
+            if (si < 6) {
+                /* экранируем перевод строки и табуляцию для корректного JSON */
+                for (const char *q = ln; *q && si + 8 < (int)sizeof(sample); q++) {
+                    if (*q == '\n' || *q == '\r') { sample[si++] = ' '; continue; }
+                    if (*q == '\t') { sample[si++] = ' '; continue; }
+                    if (*q == '"' || *q == '\\') { sample[si++] = '\\'; }
+                    sample[si++] = *q;
+                }
+                sample[si++] = ' ';
+                sample[si] = '\0';
+            }
+        }
+        fclose(fp);
+        char body[4096];
+        snprintf(body, sizeof(body),
+            "{\"index_lines\":%ld,\"sample\":\"%s\"}", lines, sample);
+        http_reply(client_fd, "200 OK", body);
+        return 0;
+    }
     if (strcmp(path, "/diag") == 0) {
         char body[1024];
         char *resp = diag_google();
@@ -1507,6 +1544,7 @@ int main(void) {
 
     init_config();
 
+    fprintf(stderr, "[build] cabinet-index-v2 (all rows, name inheritance, shift overlap)\n");
     fprintf(stderr, "[config] SHEET=%s FROM=%s TO=%s SEARCH_NAME='%s'\n",
             SPREADSHEET_ID ? SPREADSHEET_ID : "", FROM_COL ? FROM_COL : "",
             TO_COL ? TO_COL : "", SEARCH_NAME ? SEARCH_NAME : "");
