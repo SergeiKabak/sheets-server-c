@@ -18,6 +18,8 @@
 #include <ctype.h>
 #include <stdarg.h>
 
+#include "tracking.h"
+
 #define CACHE_TTL 60
 #define BUFFER_SIZE (512 * 1024)
 #define MAX_SHEETS 50
@@ -1153,6 +1155,14 @@ static void serve_miniapp(int fd) {
         ".x{display:flex;gap:8px;margin-top:12px}"
         ".x button{flex:1;padding:10px;border:none;border-radius:6px;background:var(--head);color:var(--head-fg);font-size:16px;cursor:pointer}"
         ".h{display:none}"
+        ".trk{margin-top:16px;padding:12px;background:var(--card);border-radius:8px}"
+        ".trk h3{margin:0 0 10px;font-size:15px}"
+        ".trk .row{display:flex;gap:8px}"
+        ".trk button{flex:1;padding:12px;border:none;border-radius:6px;color:#fff;font-size:15px;cursor:pointer}"
+        ".trk .in{background:#2E7D32}"
+        ".trk .out{background:#C62828}"
+        ".trk button:disabled{opacity:.5}"
+        ".trk .st{margin-top:8px;font-size:13px;color:var(--fg);opacity:.8}"
         "</style>"
         "<script>"
         "function applyTheme(){var s='light';if(window.Telegram&&window.Telegram.WebApp&&window.Telegram.WebApp.colorScheme)s=window.Telegram.WebApp.colorScheme;document.body.setAttribute('data-theme',s);}"
@@ -1200,6 +1210,7 @@ static void serve_miniapp(int fd) {
         "b.textContent=m;b.onclick=function(){load(i);};c.appendChild(b);});}"
         "function init(){"
         "applyTheme();"
+        "if(window.Telegram&&window.Telegram.WebApp){try{trkInit();}catch(e){}}"
         "var xhr=new XMLHttpRequest();"
         "xhr.open('GET','/api/months',true);"
         "xhr.onreadystatechange=function(){"
@@ -1213,11 +1224,42 @@ static void serve_miniapp(int fd) {
         "};"
         "xhr.send();"
         "}"
+        "function trkPost(action,cb){"
+        "var tg=window.Telegram&&window.Telegram.WebApp;var d=tg?tg.initData:'';"
+        "var xhr=new XMLHttpRequest();"
+        "xhr.open('POST','/api/tracking/clock?action='+action,true);"
+        "xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded');"
+        "xhr.onreadystatechange=function(){"
+        "if(xhr.readyState===4){var r;try{r=JSON.parse(xhr.responseText);}catch(e){r={ok:false,error:'Ошибка JSON'};}"
+        "if(r.ok){var msg=action==='in'?'Приход отмечен: ':'Уход отмечен: ';"
+        "msg+=(r.time||'')+(r.hours?('\\n\\nОтработано: '+r.hours+' ч.'):'')+(r.sum?('\\n\\nСумма: '+r.sum):'');"
+        "tg&&tg.showAlert?tg.showAlert(msg):alert(msg);}"
+        "else{var e=r.error||('HTTP '+xhr.status);tg&&tg.showAlert?tg.showAlert(e):alert(e);}"
+        "cb&&cb(r);}"
+        "};"
+        "xhr.send('initData='+encodeURIComponent(d));"
+        "}"
+        "function trkStatus(){"
+        "var tg=window.Telegram&&window.Telegram.WebApp;if(!tg||!tg.initData)return;"
+        "fetch('/api/tracking/summary').then(function(r){return r.json();}).then(function(d){"
+        "var el=document.getElementById('trk-st');if(!el||!d.ok)return;"
+        "el.textContent='Отработано за '+(d.month||'')+': '+d.total_hours+' ч., сумма '+d.total_sum;"
+        "}).catch(function(){});}"
+        "function trkInit(){"
+        "var b1=document.getElementById('trk-in'),b2=document.getElementById('trk-out');"
+        "if(!b1||!b2)return;"
+        "b1.onclick=function(){b1.disabled=true;trkPost('in',function(){b1.disabled=false;trkStatus();});};"
+        "b2.onclick=function(){b2.disabled=true;trkPost('out',function(){b2.disabled=false;trkStatus();});};"
+        "trkStatus();}"
 
         "</script>"
         "</head><body onload='init()'>"
         "<div class='c'><div id='months' class='m'></div>"
         "<div id='table' class='t h'></div>"
+        "<div class='trk'><h3>Учёт рабочего времени</h3>"
+        "<div class='row'><button id='trk-in' class='in'>Пришла</button>"
+        "<button id='trk-out' class='out'>Ушла</button></div>"
+        "<div class='st' id='trk-st'></div></div>"
         "</div></body></html>";
 
     char header[256];
@@ -1464,6 +1506,10 @@ static int handle_conn(int client_fd) {
     }
     if (strncmp(path, "/api/cabinet", 12) == 0) {
         api_cabinet(client_fd, path);
+        return 0;
+    }
+    if (strncmp(path, "/api/tracking/", 14) == 0) {
+        tracking_handle(client_fd, method, path, body);
         return 0;
     }
     if (strcmp(path, "/diag/cabinet") == 0) {
