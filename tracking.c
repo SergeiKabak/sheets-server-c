@@ -38,6 +38,9 @@ static char *g_token = NULL;
 static time_t g_token_exp = 0;
 static int g_inited = 0;
 static char g_current_sheet[256] = "";
+/* Базовые URL Google API (переопределяются через окружение — используется в тестах) */
+static char *g_api_base = NULL;
+static char *g_drive_base = NULL;
 
 static void trk_log(const char *fmt, ...) {
     va_list ap;
@@ -405,12 +408,13 @@ static const char *sa_access_token(void) {
         return NULL;
     }
     char *tok = json_get_string(resp, "access_token");
+    /* срок жизни читаем ДО освобождения ответа (иначе use-after-free) */
+    long exp = 3600;
+    char *e = json_get_string(resp, "expires_in");
+    if (e) { long v = atol(e); if (v > 60) exp = v; free(e); }
     free(resp);
     if (!tok) { trk_log("no access_token in response"); return NULL; }
 
-    long exp = 3600;
-    char *e = json_get_string(resp, "expires_in");
-    (void)e;
     free(g_token);
     g_token = tok;
     g_token_exp = now + exp - 120;
@@ -519,8 +523,8 @@ static char *sheets_get_values(const char *sheet_name) {
     char *enc_sheet = trk_url_encode(sheet_name);
     if (!enc_sheet) return NULL;
     snprintf(url, sizeof(url),
-        "https://sheets.googleapis.com/v4/spreadsheets/%s/values/%%27%s%%27!A:F",
-        g_sheet_id, enc_sheet);
+        "%s/v4/spreadsheets/%s/values/%%27%s%%27!A:F",
+        g_api_base, g_sheet_id, enc_sheet);
     free(enc_sheet);
 
     int status = 0;
@@ -544,9 +548,9 @@ static int sheets_append_row(const char *sheet_name, const char *values_json) {
     char *enc_sheet = trk_url_encode(sheet_name);
     if (!enc_sheet) return -1;
     snprintf(url, sizeof(url),
-        "https://sheets.googleapis.com/v4/spreadsheets/%s/values/%%27%s%%27!A:F:append"
+        "%s/v4/spreadsheets/%s/values/%%27%s%%27!A:F:append"
         "?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS",
-        g_sheet_id, enc_sheet);
+        g_api_base, g_sheet_id, enc_sheet);
     free(enc_sheet);
 
     char body[4096];
@@ -578,9 +582,9 @@ static int sheets_update_range(const char *sheet_name, const char *a1_suffix,
     char *enc = trk_url_encode(sheet_name);
     if (!enc) return -1;
     snprintf(url, sizeof(url),
-        "https://sheets.googleapis.com/v4/spreadsheets/%s/values/%%27%s%%27%s"
+        "%s/v4/spreadsheets/%s/values/%%27%s%%27%s"
         "?valueInputOption=USER_ENTERED",
-        g_sheet_id, enc, a1_suffix);
+        g_api_base, g_sheet_id, enc, a1_suffix);
     free(enc);
 
     char body[4096];
@@ -606,7 +610,7 @@ static int sheets_create_sheet(const char *sheet_name) {
 
     char url[2048];
     snprintf(url, sizeof(url),
-        "https://sheets.googleapis.com/v4/spreadsheets/%s:batchUpdate", g_sheet_id);
+        "%s/v4/spreadsheets/%s:batchUpdate", g_api_base, g_sheet_id);
 
     char body[2048];
     char *esc = json_escape_local(sheet_name);
@@ -1016,6 +1020,8 @@ static int append_row(const char *const cells[6]) {
     return rc;
 }
 
+static int tracking_ensure_spreadsheet(void);
+
 /* Ответ клиенту */
 static void trk_reply(int fd, const char *status, const char *body) {
     char header[256];
@@ -1203,6 +1209,13 @@ static void api_tracking_summary(int fd, const char *query) {
     if (month && *month) snprintf(sheet, sizeof(sheet), "%s", month);
     else current_month_name(sheet, sizeof(sheet));
 
+    if (!g_sheet_id) {
+        trk_reply(fd, "503 Service Unavailable",
+                  "{\"ok\":false,\"error\":\"tracking sheet not configured\"}");
+        free(name); free(month);
+        return;
+    }
+
     TRows rows;
     memset(&rows, 0, sizeof(rows));
     char *resp = sheets_get_values(sheet);
@@ -1247,7 +1260,6 @@ static void api_tracking_summary(int fd, const char *query) {
 void tracking_handle(int fd, const char *method, const char *path, const char *body) {
     if (!g_inited) {
         g_inited = 1;
-        g_sheet_id    = getenv("TRACKING_SHEET_ID");
         g_sa_json     = getenv("GOOGLE_SERVICE_ACCOUNT_JSON");
         g_emp_map     = getenv("EMPLOYEE_MAP");
         g_rates_map   = getenv("EMPLOYEE_RATES");
@@ -1255,11 +1267,25 @@ void tracking_handle(int fd, const char *method, const char *path, const char *b
         if (r) g_default_rate = atof(r);
         const char *tz = getenv("TZ_OFFSET_SECONDS");
         if (tz) g_tz_offset = atoi(tz);
+        const char *base = getenv("GOOGLE_API_BASE");
+        g_api_base = (base && *base) ? (char *)base : (char *)"https://sheets.googleapis.com";
+        const char *dbase = getenv("GOOGLE_DRIVE_BASE");
+        g_drive_base = (dbase && *dbase) ? (char *)dbase : (char *)"https://www.googleapis.com";
         trk_log("init: sheet=%s sa=%s emp_map=%s rate=%.0f tz=%d",
                 g_sheet_id ? g_sheet_id : "(null)",
                 g_sa_json ? "yes" : "no",
                 g_emp_map ? "yes" : "no",
                 g_default_rate, g_tz_offset);
+    }
+
+    /* Первый вызов: находим существующую таблицу или создаём новую
+       (владельцем будет Service Account). */
+    if (!g_sheet_id) {
+        if (tracking_ensure_spreadsheet() != 0) {
+            trk_reply(fd, "503 Service Unavailable",
+                      "{\"ok\":false,\"error\":\"tracking sheet not configured\"}");
+            return;
+        }
     }
 
     if (strncmp(path, "/api/tracking/clock", 18) == 0) {
@@ -1271,4 +1297,142 @@ void tracking_handle(int fd, const char *method, const char *path, const char *b
         return;
     }
     trk_reply(fd, "404 Not Found", "{\"ok\":false,\"error\":\"not found\"}");
+}
+
+/* ==================================================================
+ *  Автосоздание таблицы "Time tracking" и выдача доступа
+ * ================================================================== */
+
+/* Создаёт новую таблицу. Возвращает её ID (в g_created_sheet_id) или NULL. */
+static char *sheets_create_spreadsheet(const char *title) {
+    const char *token = sa_access_token();
+    if (!token) return NULL;
+
+    char body[1024];
+    char *esc = json_escape_local(title);
+    snprintf(body, sizeof(body),
+        "{\"properties\":{\"title\":\"%s\",\"locale\":\"ru_RU\","
+        "\"autoRecalc\":\"ON_CHANGE\"}}",
+        esc ? esc : title);
+    free(esc);
+
+    int status = 0;
+    char url[512];
+    snprintf(url, sizeof(url), "%s/v4/spreadsheets", g_api_base);
+    char *resp = trk_curl("POST", url,
+        "application/json", body, token, &status);
+    if (!resp) return NULL;
+    if (status != 200) {
+        trk_log("sheets_create_spreadsheet status=%d resp=%.300s", status, resp);
+        free(resp);
+        return NULL;
+    }
+    char *id = json_get_string(resp, "spreadsheetId");
+    char *surl = json_get_string(resp, "spreadsheetUrl");
+    if (id) {
+        trk_log("created spreadsheet '%s' id=%s url=%s", title, id, surl ? surl : "?");
+        /* сохраняем ID, чтобы пережить перезапуск */
+        FILE *f = fopen("/tmp/tracking_sheet_id", "w");
+        if (f) { fprintf(f, "%s\n", id); fclose(f); }
+    }
+    free(surl);
+    free(resp);
+    return id;
+}
+
+/* Выдаёт доступ на редактирование указанному email (владелец таблицы). */
+static int drive_share(const char *file_id, const char *email, const char *role) {
+    const char *token = sa_access_token();
+    if (!token || !email || !*email) return -1;
+
+    char url[2048];
+    snprintf(url, sizeof(url),
+        "%s/drive/v3/files/%s/permissions"
+        "?sendNotificationEmail=false", g_drive_base, file_id);
+
+    char body[1024];
+    char *ee = json_escape_local(email);
+    snprintf(body, sizeof(body),
+        "{\"role\":\"%s\",\"type\":\"user\",\"emailAddress\":\"%s\"}",
+        role ? role : "writer", ee ? ee : email);
+    free(ee);
+
+    int status = 0;
+    char *resp = trk_curl("POST", url, "application/json", body, token, &status);
+    if (!resp) return -1;
+    if (status != 200 && status != 201) {
+        trk_log("drive_share status=%d resp=%.300s", status, resp);
+        free(resp);
+        return -1;
+    }
+    trk_log("shared '%s' with %s as %s", file_id, email, role ? role : "writer");
+    free(resp);
+    return 0;
+}
+
+/* Проверяет, что таблица существует и доступна */
+static int sheets_sheet_exists(const char *file_id) {
+    const char *token = sa_access_token();
+    if (!token) return 0;
+    char url[2048];
+    snprintf(url, sizeof(url),
+        "%s/v4/spreadsheets/%s?fields=spreadsheetId", g_api_base, file_id);
+    int status = 0;
+    char *resp = trk_curl("GET", url, NULL, NULL, token, &status);
+    if (!resp) return 0;
+    int ok = (status == 200);
+    free(resp);
+    return ok;
+}
+
+/* Полная инициализация: найти или создать таблицу, выдать доступ.
+ * g_sheet_id обновляется. Возвращает 0 при успехе. */
+static int tracking_ensure_spreadsheet(void) {
+    const char *env_id = getenv("TRACKING_SHEET_ID");
+    const char *share_email = getenv("TRACKING_SHARE_EMAIL");
+    const char *title = getenv("TRACKING_SHEET_TITLE");
+    if (!title || !*title) title = "Time tracking";
+
+    /* 1) ID из окружения */
+    if (env_id && *env_id) {
+        if (sheets_sheet_exists(env_id)) {
+            g_sheet_id = strdup(env_id);
+            if (share_email && *share_email) drive_share(env_id, share_email, "writer");
+            return 0;
+        }
+        trk_log("TRACKING_SHEET_ID=%s not accessible, will try local cache/create", env_id);
+    }
+
+    /* 2) ID из локального кэша (создан ранее этим же сервис-аккаунтом) */
+    FILE *cf = fopen("/tmp/tracking_sheet_id", "r");
+    if (cf) {
+        char cached[128] = {0};
+        if (fgets(cached, sizeof(cached), cf)) {
+            char *nl = strchr(cached, '\n'); if (nl) *nl = '\0';
+            if (*cached && sheets_sheet_exists(cached)) {
+                fclose(cf);
+                g_sheet_id = strdup(cached);
+                trk_log("using cached spreadsheet id=%s", cached);
+                if (share_email && *share_email) drive_share(cached, share_email, "writer");
+                return 0;
+            }
+        }
+        fclose(cf);
+    }
+
+    /* 3) создаём новую таблицу */
+    char *new_id = sheets_create_spreadsheet(title);
+    if (!new_id) {
+        trk_log("cannot create spreadsheet (need Service Account with spreadsheets scope)");
+        return -1;
+    }
+    g_sheet_id = new_id;
+
+    /* 4) выдаём доступ владельцу */
+    if (share_email && *share_email) {
+        if (drive_share(g_sheet_id, share_email, "writer") != 0) {
+            trk_log("WARNING: could not share with %s — share manually", share_email);
+        }
+    }
+    return 0;
 }

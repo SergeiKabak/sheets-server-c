@@ -34,7 +34,36 @@ supported by this API`). Поэтому для записи использует
 6. На экране ключей: **Create new key → JSON**. Скачается файл
    вида `sheets-tracker-xxxxx.json`.
 
-### 2. Дать доступ к таблице
+### 2. Выбрать один из двух вариантов
+
+#### Вариант А (проще) — сервер создаст таблицу сам
+
+Сервер умеет **сам создать таблицу** `Time tracking` через Service Account
+и выдать вам права. Тогда шаг с ручным созданием таблицы не нужен.
+
+В Render задайте:
+
+| Переменная | Значение |
+|------------|----------|
+| `TRACKING_SHEET_ID` | оставьте пустым / удалите |
+| `TRACKING_SHARE_EMAIL` | ваш email (например `ivanov@gmail.com`) |
+| `TRACKING_SHEET_TITLE` | `Time tracking` (необязательно) |
+
+При первом нажатии «Пришла» сервер:
+1. создаст таблицу с именем `Time tracking` (владелец — Service Account);
+2. выдаст вам права **Редактор**;
+3. сохранит ID таблицы в `/tmp/tracking_sheet_id`.
+
+> Нужно включить **Drive API** в проекте Service Account:
+> https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=ВАШ_ПРОЕКТ
+> (иначе авто-выдача прав не сработает — таблица создастся, но вы её не увидите).
+
+Ссылку на созданную таблицу сервер выведет в лог Render:
+```
+[track] created spreadsheet 'Time tracking' id=1a2b... url=https://docs.google.com/spreadsheets/d/1a2b...
+```
+
+#### Вариант Б — использовать уже созданную таблицу
 
 1. Откройте таблицу Time tracking:
    https://docs.google.com/spreadsheets/d/1zhWZRFI6GYYnh6PNQn37KiSyPLvjkSwJz-CKwF0xEnw/edit
@@ -44,6 +73,8 @@ supported by this API`). Поэтому для записи использует
 4. Роль: **Редактор** (Editor).
 5. Нажмите **Отправить** / **Готово**.
 
+В Render: `TRACKING_SHEET_ID=1zhWZRFI6GYYnh6PNQn37KiSyPLvjkSwJz-CKwF0xEnw`
+
 > Важно: если таблица закрыта («Ограниченный доступ»), пригласите и себя.
 
 ### 3. Задать переменные окружения в Render
@@ -52,7 +83,9 @@ supported by this API`). Поэтому для записи использует
 
 | Переменная | Значение |
 |------------|----------|
-| `TRACKING_SHEET_ID` | `1zhWZRFI6GYYnh6PNQn37KiSyPLvjkSwJz-CKwF0xEnw` |
+| `TRACKING_SHEET_ID` | `1zhWZRFI6GYYnh6PNQn37KiSyPLvjkSwJz-CKwF0xEnw` — либо пусто, если сервер создаёт таблицу сам |
+| `TRACKING_SHARE_EMAIL` | ваш email — чтобы получить права на созданную сервером таблицу |
+| `TRACKING_SHEET_TITLE` | `Time tracking` (необязательно) |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | **Весь содержимое скачанного JSON-файла** (одной строкой) |
 | `EMPLOYEE_MAP` | `{"123456789":"Бинкевич Татьяна Эдуардовна"}` |
 | `EMPLOYEE_RATES` | `{"Бинкевич Татьяна Эдуардовна":"500"}` |
@@ -102,6 +135,19 @@ curl "https://sheets-server-c.onrender.com/api/tracking/summary"
    - **«Пришла»** — записывает время прихода (или заполняет существующую строку).
    - **«Ушла»** — записывает время ухода, считает часы и сумму.
 5. Часы = (уход − приход) в часах, Сумма = часы × ставка.
+
+## Кто владелец таблицы
+
+- **Вариант А** — владелец таблицы это Service Account
+  (`sheets-tracker@проект.iam.gserviceaccount.com`). Вы получаете права
+  Редактора через `TRACKING_SHARE_EMAIL`.
+- **Вариант Б** — владелец остаётся ваш Google-аккаунт, Service Account
+  добавляется как Редактор.
+
+Сам я (AI-ассистент) не могу быть владельцем таблицы Google: для этого нужен
+вход в ваш Google-аккаунт (логин, 2FA, подтверждение), а такие действия
+нельзя автоматизировать. Но через Service Account это делает сам сервер —
+и вы остаётесь полноправным редактором.
 
 ## Ограничения
 
