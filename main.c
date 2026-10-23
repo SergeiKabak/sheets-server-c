@@ -1247,7 +1247,6 @@ static void serve_miniapp(int fd) {
         "xhr.send('initData='+encodeURIComponent(d));"
         "}"
         "function trkStatus(){"
-        "var d=trkInitData();if(!d){trkMsg('Откройте в Telegram, чтобы видеть свю статистику.',false);return;}"
         "fetch('/api/tracking/summary').then(function(r){return r.json();}).then(function(dd){"
         "if(!dd||!dd.ok)return;"
         "trkMsg('Отработано за '+(dd.month||'')+': '+dd.total_hours+' ч., сумма '+dd.total_sum,true);"

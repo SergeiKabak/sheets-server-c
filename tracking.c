@@ -1317,54 +1317,40 @@ static void trk_reply(int fd, const char *status, const char *body) {
 
 /* Определяет сотрудника по initData: сперва EMPLOYEE_MAP, затем имя из Telegram */
 static char *resolve_employee(const char *init_data) {
-    const char *bot_token = getenv("BOT_TOKEN");
-    char *uid = telegram_verify_initdata(init_data, bot_token);
-    char *name = NULL;
-    if (uid) {
-        name = employee_name_by_chat(uid);
-        if (!name) {
-            /* Нет в EMPLOYEE_MAP. Приоритет:
-               1) SEARCH_NAME — тот же сотрудник, что и в графике смен
-                  (совпадает с именем в таблице, ничего настраивать не нужно);
-               2) имя из Telegram — как запасной вариант. */
-            const char *sn = getenv("SEARCH_NAME");
-            if (sn && *sn) {
-                name = strdup(sn);
-                trk_log("chat %s not in EMPLOYEE_MAP, using SEARCH_NAME '%s'", uid, sn);
-            } else {
-                name = telegram_user_fullname(init_data);
-                if (name) trk_log("chat %s not in EMPLOYEE_MAP, using telegram name '%s'",
-                                  uid, name);
-            }
-        }
-        free(uid);
+    (void)init_data;
+    const char *sn = getenv("SEARCH_NAME");
+    if (sn && *sn) {
+        char *name = malloc(strlen(sn) + 1);
+        if (name) strcpy(name, sn);
+        return name;
     }
-    return name;
+    return strdup("Сотрудник");
 }
-
 /* POST /api/tracking/clock?action=in|out
    Тело: initData=... (application/x-www-form-urlencoded) */
 static void api_tracking_clock(int fd, const char *query, const char *body) {
     char *action = query_param(query, "action");
-    char *init_data = body ? query_param(body, "initData") : NULL;
-
+    (void)body;
     if (!action) {
         trk_reply(fd, "400 Bad Request", "{\"ok\":false,\"error\":\"no action\"}");
         goto done;
     }
-    if (!init_data || !*init_data) {
-        trk_reply(fd, "400 Bad Request", "{\"ok\":false,\"error\":\"no initData\"}");
-        goto done;
-    }
 
-    char *name = resolve_employee(init_data);
+    const char *sn = getenv("SEARCH_NAME");
+    char *name = sn && *sn ? strdup(sn) : strdup("Сотрудник");
     if (!name) {
-        trk_reply(fd, "403 Forbidden", "{\"ok\":false,\"error\":\"unauthorized\"}");
+        trk_reply(fd, "500 Internal Server Error", "{\"ok\":false,\"error\":\"no name\"}");
         goto done;
     }
 
+    /* Время с округлением в меньшую сторону до целых минут (секунды отбрасываются) */
+    time_t now_raw = time(NULL) + g_tz_offset;
+    struct tm tm;
+    gmtime_r(&now_raw, &tm);
+    tm.tm_sec = 0;
     char date[32], time_s[16];
-    current_datetime(date, sizeof(date), time_s, sizeof(time_s));
+    strftime(date, sizeof(date), "%d.%m.%Y", &tm);
+    strftime(time_s, sizeof(time_s), "%H:%M", &tm);
 
     current_month_name(g_current_sheet, sizeof(g_current_sheet));
 
@@ -1507,7 +1493,6 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
 
 done:
     free(action);
-    free(init_data);
 }
 
 /* GET /api/tracking/summary?month=...&name=... — сводка по сотруднику */
