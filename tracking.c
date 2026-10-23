@@ -26,6 +26,10 @@
 #define TRK_INFILE    "/tmp/trk_jwt_in.txt"
 #define TRK_SIGFILE   "/tmp/trk_jwt_sig.bin"
 #define TRK_INITFILE  "/tmp/trk_initdata.txt"
+/* Имена временных файлов с PID: сервер обрабатывает каждый запрос в
+   отдельном процессе (fork), общие файлы приводили к гонке. */
+#define TRK_TMPFMT    "/tmp/trk_%d_%s"
+#define TRK_TMPMAX    256
 
 static char *g_sa_json = NULL;
 static char *g_sheet_id = NULL;
@@ -130,6 +134,47 @@ static char *json_get_string(const char *json, const char *key) {
         }
     }
     out[o] = '\0';
+    return out;
+}
+
+/* Формирует уникальный путь временного файла (с PID) — запросы
+   обрабатываются в отдельных процессах, общие файлы давали гонку. */
+static const char *trk_tmpfile(const char *suffix, char *buf, size_t cap) {
+    snprintf(buf, cap, TRK_TMPFMT, (int)getpid(), suffix);
+    return buf;
+}
+
+/* Извлекает значение поля, которое может быть числом или строкой.
+   Telegram присылает user.id как число (без кавычек), поэтому
+   json_get_string() для него не подходит. */
+static char *json_get_raw_value(const char *json, const char *key) {
+    if (!json || !key) return NULL;
+    char pat[192];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = strstr(json, pat);
+    if (!p) return NULL;
+    p += strlen(pat);
+    while (*p && *p != ':') p++;
+    if (!*p) return NULL;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (!*p) return NULL;
+
+    char *out;
+    if (*p == '"') {
+        out = json_get_string(json, key);
+    } else {
+        /* число / true / false — читаем до запятой или закрывающей скобки */
+        const char *start = p;
+        while (*p && *p != ',' && *p != '}' && *p != ']') p++;
+        size_t len = (size_t)(p - start);
+        while (len && (start[len - 1] == ' ' || start[len - 1] == '\n' ||
+                       start[len - 1] == '\r' || start[len - 1] == '\t')) len--;
+        out = malloc(len + 1);
+        if (!out) return NULL;
+        memcpy(out, start, len);
+        out[len] = '\0';
+    }
     return out;
 }
 
@@ -361,11 +406,13 @@ static const char *sa_access_token(void) {
     if (!turi) turi = strdup("https://oauth2.googleapis.com/token");
 
     /* сохраняем приватный ключ в PEM-файл (в JSON переносы строк как \n) */
-    FILE *kp = fopen(TRK_KEYFILE, "w");
+    char keyfile[TRK_TMPMAX];
+    trk_tmpfile("sa_key.pem", keyfile, sizeof(keyfile));
+    FILE *kp = fopen(keyfile, "w");
     if (!kp) { free(email); free(pkey); free(turi); return NULL; }
     fputs(pkey, kp);
     fclose(kp);
-    chmod(TRK_KEYFILE, 0600);
+    chmod(keyfile, 0600);
 
     /* JWT header + payload */
     char header[] = "{\"alg\":\"RS256\",\"typ\":\"JWT\"}";
@@ -383,7 +430,10 @@ static const char *sa_access_token(void) {
     char signing[2048];
     snprintf(signing, sizeof(signing), "%s.%s", h, p);
 
-    FILE *in = fopen(TRK_INFILE, "w");
+    char infile[TRK_TMPMAX], sigfile[TRK_TMPMAX];
+    trk_tmpfile("jwt_in.txt", infile, sizeof(infile));
+    trk_tmpfile("jwt_sig.bin", sigfile, sizeof(sigfile));
+    FILE *in = fopen(infile, "w");
     if (!in) { free(email); free(pkey); free(turi); free(h); free(p); return NULL; }
     fputs(signing, in);
     fclose(in);
@@ -391,20 +441,23 @@ static const char *sa_access_token(void) {
     /* подпись RSA-SHA256 */
     char cmd[2048];
     snprintf(cmd, sizeof(cmd),
-        "openssl dgst -sha256 -sign '%s' -out '%s' '%s' 2>&1", TRK_KEYFILE,
-        TRK_SIGFILE, TRK_INFILE);
+        "openssl dgst -sha256 -sign '%s' -out '%s' '%s' 2>&1", keyfile,
+        sigfile, infile);
     if (system(cmd) != 0) {
         trk_log("openssl signing failed");
         free(email); free(pkey); free(turi); free(h); free(p);
         return NULL;
     }
 
-    FILE *sf = fopen(TRK_SIGFILE, "rb");
+    FILE *sf = fopen(sigfile, "rb");
     if (!sf) { free(email); free(pkey); free(turi); free(h); free(p); return NULL; }
     unsigned char sig[1024];
     size_t siglen = fread(sig, 1, sizeof(sig), sf);
     fclose(sf);
 
+    remove(infile);
+    remove(sigfile);
+    remove(keyfile);
     char *sig_b64 = b64url(sig, siglen);
     if (!sig_b64) { free(email); free(pkey); free(turi); free(h); free(p); return NULL; }
 
@@ -457,12 +510,32 @@ static const char *MONTH_NAMES[] = {
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
 };
 
-/* Текущий месяц и год по локальному времени -> "Октябрь 2026" */
+/* Текущий месяц и год по локальному времени -> "10.2026" (цифрами) */
 static void current_month_name(char *out, size_t cap) {
     time_t now = time(NULL) + g_tz_offset;
     struct tm tm;
     gmtime_r(&now, &tm);
-    snprintf(out, cap, "%s %d", MONTH_NAMES[tm.tm_mon], tm.tm_year + 1900);
+    snprintf(out, cap, "%02d.%04d", tm.tm_mon + 1, tm.tm_year + 1900);
+}
+
+/* Имя вкладки по названию месяца (например "Октябрь 2026" -> "10.2026") —
+   для совместимости со старыми вкладками. */
+static void month_name_to_numeric(const char *month, char *out, size_t cap) {
+    out[0] = '\0';
+    for (int i = 0; i < 12; i++) {
+        const char *m = MONTH_NAMES[i];
+        size_t len = strlen(m);
+        if (strncmp(month, m, len) == 0) {
+            const char *rest = month + len;
+            while (*rest == ' ') rest++;
+            int year = 0;
+            if (sscanf(rest, "%d", &year) == 1)
+                snprintf(out, cap, "%02d.%04d", i + 1, year);
+            return;
+        }
+    }
+    /* уже в формате цифр ("10.2026") */
+    snprintf(out, cap, "%s", month);
 }
 
 /* Текущие дата и время по локальному времени -> "23.10.2026", "08:30" */
@@ -802,13 +875,15 @@ static char *telegram_verify_initdata(const char *init_data, const char *bot_tok
     char webapp_hex[64];
     hexify((const unsigned char *)WEBAPP, strlen(WEBAPP), webapp_hex);
 
-    FILE *bt = fopen("/tmp/trk_bot_token.txt", "w");
+    char tokfile[TRK_TMPMAX];
+    trk_tmpfile("bot_token", tokfile, sizeof(tokfile));
+    FILE *bt = fopen(tokfile, "w");
     if (!bt) return NULL;
     fputs(bot_token, bt);
     fclose(bt);
 
     size_t sklen = 0;
-    unsigned char *sk = hmac_sha256(webapp_hex, "/tmp/trk_bot_token.txt", &sklen);
+    unsigned char *sk = hmac_sha256(webapp_hex, tokfile, &sklen);
     if (!sk || sklen != 32) { free(sk); return NULL; }
     char sk_hex[128];
     hexify(sk, sklen, sk_hex);
@@ -827,7 +902,9 @@ static char *telegram_verify_initdata(const char *init_data, const char *bot_tok
             }
         }
     }
-    FILE *dcs = fopen("/tmp/trk_dcs.txt", "w");
+    char dcsfile[TRK_TMPMAX];
+    trk_tmpfile("dcs", dcsfile, sizeof(dcsfile));
+    FILE *dcs = fopen(dcsfile, "w");
     if (!dcs) { free(provided_hash); return NULL; }
     int first = 1;
     for (int i = 0; i < n; i++) {
@@ -839,7 +916,9 @@ static char *telegram_verify_initdata(const char *init_data, const char *bot_tok
     fclose(dcs);
 
     size_t hlen = 0;
-    unsigned char *h = hmac_sha256(sk_hex, "/tmp/trk_dcs.txt", &hlen);
+    unsigned char *h = hmac_sha256(sk_hex, dcsfile, &hlen);
+    remove(dcsfile);
+    remove(tokfile);
     if (!h || hlen != 32) { free(h); free(provided_hash); return NULL; }
     char *calc = b64url(h, hlen);
     free(h);
@@ -859,7 +938,9 @@ static char *telegram_verify_initdata(const char *init_data, const char *bot_tok
     for (int i = 0; i < n; i++) {
         if (kv[i].val && strcmp(kv[i].key, "user") == 0) { user_json = kv[i].val; kv[i].val = NULL; }
     }
-    char *uid = user_json ? json_get_string(user_json, "id") : NULL;
+    /* id — число, а не строка: используем json_get_raw_value() */
+    char *uid = user_json ? json_get_raw_value(user_json, "id") : NULL;
+    if (uid && !*uid) { free(uid); uid = NULL; }
     free(user_json);
 
     for (int i = 0; i < n; i++) free(kv[i].val);
@@ -1147,16 +1228,24 @@ static int find_block_end(TRows *t, int block_idx) {
     return last;
 }
 
-/* Вставляет пустую строку в позицию idx */
+/* Вставляет пустую строку в позицию idx.
+   ВАЖНО: строки сдвигаются вместе с указателями на строки (владение
+   переходит к новой позиции), иначе возникает double-free. */
 static void trows_insert(TRows *t, int idx) {
     if (idx < 0) idx = 0;
     if (idx > t->count) idx = t->count;
-    trows_add(t);
-    for (int i = t->count - 1; i > idx; i--) {
+    if (t->count >= t->cap) {
+        t->cap = t->cap ? t->cap * 2 : 32;
+        t->row = realloc(t->row, sizeof(TRow) * t->cap);
+    }
+    /* сдвигаем вниз: владение указателями переходит к новым позициям */
+    for (int i = t->count; i > idx; i--) {
         t->row[i] = t->row[i - 1];
     }
+    t->count++;
+    /* позиция idx теперь занята новой пустой строкой; прежнее содержимое
+       живёт в idx+1, поэтому освобождать его здесь нельзя */
     for (int cc = 0; cc < 6; cc++) {
-        free(t->row[idx].cell[cc]);
         t->row[idx].cell[cc] = strdup("");
     }
 }
@@ -1417,8 +1506,12 @@ static void api_tracking_summary(int fd, const char *query) {
     char *month = query_param(query, "month");
 
     char sheet[256];
-    if (month && *month) snprintf(sheet, sizeof(sheet), "%s", month);
-    else current_month_name(sheet, sizeof(sheet));
+    if (month && *month) {
+        /* "Октябрь 2026" -> "10.2026" */
+        month_name_to_numeric(month, sheet, sizeof(sheet));
+    } else {
+        current_month_name(sheet, sizeof(sheet));
+    }
 
     if (!g_sheet_id) {
         trk_reply(fd, "503 Service Unavailable",
