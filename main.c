@@ -1325,9 +1325,9 @@ static void api_cabinet(int fd, const char *query) {
     char *em = json_escape(month);
     off += snprintf(json + off, cap - off, "%s", em ? em : month);
     free(em);
-    off += snprintf(json + off, cap - off, "\",\"day\":%d,\"shift\":\"%s\",\"colleagues\":[", day, shift);
+    off += snprintf(json + off, cap - off, "\",\"day\":%d,\"shift\":\"%s\",\"colleagues\":", day, shift);
 
-    int n = find_cabinet_colleagues_from_index(month, day, cabinet, shift[0] ? shift : NULL, json + off, cap - off);
+    int n = find_cabinet_colleagues_from_index(month, day, cabinet, shift[0] ? shift : NULL, json + off, cap - off - 1);
     off += n;
 
     snprintf(json + off, cap - off, "}");
