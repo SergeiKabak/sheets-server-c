@@ -710,10 +710,11 @@ static int find_cabinet_colleagues_from_index(const char *month, int day,
         free(es);
     }
     fclose(fp);
-    off += snprintf(out + off, outcap - off, "]");
     if (first) {
         // пустой результат
         off = snprintf(out, outcap, "[]");
+    } else {
+        off += snprintf(out + off, outcap - off, "]");
     }
     return off;
 }
