@@ -639,6 +639,7 @@ static char *json_escape(const char *s);
    out должен быть буфером достаточного размера. Возвращает длину JSON. */
 static int find_cabinet_colleagues_from_index(const char *month, int day,
                                               const char *cabinet,
+                                              const char *shift,
                                               char *out, size_t outcap) {
     FILE *fp = fopen(CABINET_INDEX_FILE, "r");
     if (!fp) {
@@ -652,7 +653,7 @@ static int find_cabinet_colleagues_from_index(const char *month, int day,
         int d = 0;
         char c[128] = "";
         char name[256] = "";
-        char shift[128] = "";
+        char s[128] = "";
         char *p = line;
         // месяц
         char *t = strchr(p, '\t');
@@ -687,22 +688,24 @@ static int find_cabinet_colleagues_from_index(const char *month, int day,
         // shift (до конца строки)
         l = strlen(p);
         while (l && (p[l-1] == '\n' || p[l-1] == '\r')) p[--l] = '\0';
-        if (l >= sizeof(shift)) l = sizeof(shift) - 1;
-        memcpy(shift, p, l); shift[l] = '\0';
+        if (l >= sizeof(s)) l = sizeof(s) - 1;
+        memcpy(s, p, l); s[l] = '\0';
 
         if (strcmp(m, month) != 0) continue;
         if (d != day) continue;
         if (strcmp(c, cabinet) != 0) continue;
+        // фильтр по смене, если передана
+        if (shift && *shift && strcmp(s, shift) != 0) continue;
 
         if (!first) {
             off += snprintf(out + off, outcap - off, ",");
         }
         first = 0;
         char *en = json_escape(name);
-        char *es = json_escape(shift);
+        char *es = json_escape(s);
         off += snprintf(out + off, outcap - off,
             "{\"name\":\"%s\",\"shift\":\"%s\"}",
-            en ? en : name, es ? es : shift);
+            en ? en : name, es ? es : s);
         free(en);
         free(es);
     }
@@ -1269,6 +1272,7 @@ static void api_cabinet(int fd, const char *query) {
     const char *p_month = strstr(query, "month=");
     const char *p_cab   = strstr(query, "cabinet=");
     const char *p_day   = strstr(query, "day=");
+    const char *p_shift = strstr(query, "shift=");
     if (!p_month || !p_cab || !p_day) {
         http_reply(fd, "400 Bad Request", "{\"error\":\"missing params\"}");
         return;
@@ -1276,10 +1280,12 @@ static void api_cabinet(int fd, const char *query) {
     p_month += 6;
     p_cab   += 8;
     p_day   += 4;
+    if (p_shift) p_shift += 6;
 
     char tmp[512];
     char month[256] = "";
     char cabinet[128] = "";
+    char shift[128] = "";
     int day = 0;
 
     #define EXTRACT_PARAM(src, dst, dstcap) do { \
@@ -1292,6 +1298,7 @@ static void api_cabinet(int fd, const char *query) {
 
     EXTRACT_PARAM(p_month, month, sizeof(month));
     EXTRACT_PARAM(p_cab, cabinet, sizeof(cabinet));
+    if (p_shift) EXTRACT_PARAM(p_shift, shift, sizeof(shift));
 
     {
         const char *amp = strchr(p_day, '&');
@@ -1303,7 +1310,7 @@ static void api_cabinet(int fd, const char *query) {
     }
     #undef EXTRACT_PARAM
 
-    fprintf(stderr, "[cabinet] month='%s' cabinet='%s' day=%d\n", month, cabinet, day);
+    fprintf(stderr, "[cabinet] month='%s' cabinet='%s' day=%d shift='%s'\n", month, cabinet, day, shift);
 
     size_t cap = 65536;
     char *json = malloc(cap);
@@ -1317,9 +1324,9 @@ static void api_cabinet(int fd, const char *query) {
     char *em = json_escape(month);
     off += snprintf(json + off, cap - off, "%s", em ? em : month);
     free(em);
-    off += snprintf(json + off, cap - off, "\",\"day\":%d,\"colleagues\":[", day);
+    off += snprintf(json + off, cap - off, "\",\"day\":%d,\"shift\":\"%s\",\"colleagues\":[", day, shift);
 
-    int n = find_cabinet_colleagues_from_index(month, day, cabinet, json + off, cap - off);
+    int n = find_cabinet_colleagues_from_index(month, day, cabinet, shift[0] ? shift : NULL, json + off, cap - off);
     off += n;
 
     snprintf(json + off, cap - off, "}");
