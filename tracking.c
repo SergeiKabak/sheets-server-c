@@ -1499,6 +1499,11 @@ done:
 static void api_tracking_summary(int fd, const char *query) {
     char *name = query_param(query, "name");
     char *month = query_param(query, "month");
+    /* Если имя не передано — берём SEARCH_NAME (отмечается только один сотрудник) */
+    if (!name) {
+        const char *sn = getenv("SEARCH_NAME");
+        if (sn && *sn) name = strdup(sn);
+    }
 
     char sheet[256];
     if (month && *month) {
