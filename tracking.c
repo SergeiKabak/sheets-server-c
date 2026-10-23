@@ -1323,9 +1323,19 @@ static char *resolve_employee(const char *init_data) {
     if (uid) {
         name = employee_name_by_chat(uid);
         if (!name) {
-            /* нет в карте — используем имя из Telegram */
-            name = telegram_user_fullname(init_data);
-            if (name) trk_log("chat %s not in EMPLOYEE_MAP, using telegram name '%s'", uid, name);
+            /* Нет в EMPLOYEE_MAP. Приоритет:
+               1) SEARCH_NAME — тот же сотрудник, что и в графике смен
+                  (совпадает с именем в таблице, ничего настраивать не нужно);
+               2) имя из Telegram — как запасной вариант. */
+            const char *sn = getenv("SEARCH_NAME");
+            if (sn && *sn) {
+                name = strdup(sn);
+                trk_log("chat %s not in EMPLOYEE_MAP, using SEARCH_NAME '%s'", uid, sn);
+            } else {
+                name = telegram_user_fullname(init_data);
+                if (name) trk_log("chat %s not in EMPLOYEE_MAP, using telegram name '%s'",
+                                  uid, name);
+            }
         }
         free(uid);
     }
@@ -1568,7 +1578,8 @@ void tracking_handle(int fd, const char *method, const char *path, const char *b
         g_emp_map     = getenv("EMPLOYEE_MAP");
         g_rates_map   = getenv("EMPLOYEE_RATES");
         const char *r = getenv("HOURLY_RATE");
-        if (r) g_default_rate = atof(r);
+        if (r && *r) g_default_rate = atof(r);
+        else { g_default_rate = 500.0; trk_log("HOURLY_RATE not set, using default 500"); }
         const char *tz = getenv("TZ_OFFSET_SECONDS");
         if (tz) g_tz_offset = atoi(tz);
         const char *base = getenv("GOOGLE_API_BASE");
