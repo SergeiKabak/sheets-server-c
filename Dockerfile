@@ -5,17 +5,21 @@ WORKDIR /build
 
 COPY . .
 
-RUN gcc -O2 -o server_app main.c
+RUN gcc -O2 -Wall -Wextra -o server_app main.c
 
 # --- ЭТАП 2: Финальный запуск ---
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY --from=builder /build/server_app .
+
+# Переменные окружения (секреты) задаются на Render:
+#   BOT_TOKEN, SPREADSHEET_ID, GOOGLE_API_KEY, FROM_COL, TO_COL, SEARCH_NAME, MINIAPP_URL, PORT
 
 EXPOSE 8080
 
