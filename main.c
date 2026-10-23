@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <fcntl.h>
+#include <stdarg.h>
 
 #define CACHE_TTL 60
 #define BUFFER_SIZE (512 * 1024)
@@ -21,12 +22,31 @@ static const char *FROM_COL;
 static const char *TO_COL;
 static const char *SEARCH_NAME;
 
+#define DEFAULT_FROM_COL "C"
+#define DEFAULT_TO_COL   "AJ"
+
+static void log_msg(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "[sheets] ");
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+}
+
 static void init_config(void) {
     SPREADSHEET_ID = getenv("SPREADSHEET_ID");
     GOOGLE_API_KEY = getenv("GOOGLE_API_KEY");
     FROM_COL = getenv("FROM_COL");
     TO_COL = getenv("TO_COL");
     SEARCH_NAME = getenv("SEARCH_NAME");
+
+    if (!FROM_COL) FROM_COL = DEFAULT_FROM_COL;
+    if (!TO_COL)   TO_COL   = DEFAULT_TO_COL;
+
+    log_msg("config: SPREADSHEET_ID=%s FROM_COL=%s TO_COL=%s SEARCH_NAME=%s",
+            SPREADSHEET_ID ? SPREADSHEET_ID : "(null)",
+            FROM_COL, TO_COL, SEARCH_NAME ? SEARCH_NAME : "(null)");
 }
 
 static char *fetch_url(const char *url) {
@@ -258,10 +278,158 @@ static void free_rows(char **rows, int *lens, int count) {
     free(lens);
 }
 
+/* Декодирует URL-кодирование (%20, %D0%91 и т.д.) и '+' -> пробел */
+static char *url_decode(const char *src) {
+    size_t len = strlen(src);
+    char *dst = malloc(len + 1);
+    if (!dst) return NULL;
+    char *d = dst;
+    for (size_t i = 0; i < len; i++) {
+        if (src[i] == '%' && i + 2 < len) {
+            char hex[3] = {src[i + 1], src[i + 2], '\0'};
+            unsigned int val;
+            sscanf(hex, "%x", &val);
+            *d++ = (char)val;
+            i += 2;
+        } else if (src[i] == '+') {
+            *d++ = ' ';
+        } else {
+            *d++ = src[i];
+        }
+    }
+    *d = '\0';
+    return dst;
+}
+
+/* Экранирует кавычки и обратные слэши для JSON-строки */
+static char *escape_json(const char *s) {
+    if (!s) {
+        char *empty = malloc(1);
+        if (empty) empty[0] = '\0';
+        return empty;
+    }
+    size_t len = strlen(s);
+    char *out = malloc(len * 2 + 1);
+    if (!out) return NULL;
+    char *d = out;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (c == '"' || c == '\\') { *d++ = '\\'; *d++ = c; }
+        else *d++ = c;
+    }
+    *d = '\0';
+    return out;
+}
+
+/* Эндпоинт /api/cabinet?month=...&cabinet=...&day=...
+   Возвращает коллег (кроме SEARCH_NAME), которые в этот день работают
+   в указанном кабинете. */
+static void handle_cabinet_colleagues(int client_fd, const char *month,
+                                      const char *cabinet, int day) {
+    char sheets[MAX_SHEETS][MAX_SHEET_NAME];
+    int sheet_count = get_visible_sheets(sheets, MAX_SHEETS);
+    log_msg("handle_cabinet_colleagues: month=%s cabinet=%s day=%d sheets=%d",
+            month ? month : "(null)", cabinet ? cabinet : "(null)", day, sheet_count);
+
+    size_t cap = 65536;
+    char *json = malloc(cap);
+    if (!json) {
+        const char *err = "HTTP/1.1 500 Internal Server Error\r\n"
+                          "Content-Length: 0\r\n"
+                          "Connection: close\r\n\r\n";
+        write(client_fd, err, strlen(err));
+        shutdown(client_fd, SHUT_WR);
+        close(client_fd);
+        return;
+    }
+    size_t len = 0;
+
+    #define APPEND(fmt, ...) do { \
+        int n = snprintf(json + len, cap - len, fmt, ##__VA_ARGS__); \
+        if (n > 0) len += n; \
+        if (len + 4096 > cap) { \
+            cap *= 2; \
+            char *nj = realloc(json, cap); \
+            if (!nj) { free(json); return; } \
+            json = nj; \
+        } \
+    } while(0)
+
+    APPEND("{\"cabinet\":\"%s\",\"month\":\"%s\",\"day\":%d,\"colleagues\":[",
+           cabinet ? cabinet : "", month ? month : "", day);
+
+    int first = 1;
+    /* 0=имя, 1=смена, 2=день 1, ..., день N -> индекс 1+N */
+    int col = 1 + day;
+
+    for (int i = sheet_count - 1; i >= 0; i--) {
+        char range[256];
+        snprintf(range, sizeof(range), "%s!%s:%s", sheets[i], FROM_COL, TO_COL);
+        char *encoded_range = url_encode(range);
+        char url[2048];
+        snprintf(url, sizeof(url),
+            "https://sheets.googleapis.com/v4/spreadsheets/%s/values/%s?key=%s",
+            SPREADSHEET_ID, encoded_range, GOOGLE_API_KEY);
+        free(encoded_range);
+
+        char *response = fetch_url(url);
+        if (!response) continue;
+
+        const char *values_pos = strstr(response, "\"values\"");
+        if (!values_pos) { free(response); continue; }
+
+        char **rows = NULL;
+        int *row_lens = NULL;
+        int row_count = parse_rows(values_pos, &rows, &row_lens);
+        if (row_count == 0) { free_rows(rows, row_lens, row_count); free(response); continue; }
+
+        for (int r = 0; r < row_count; r++) {
+            char **row = (char **)rows[r];
+            int rlen = row_lens[r];
+            if (rlen <= col || !row[col]) continue;
+            if (strcmp(row[col], cabinet) != 0) continue;
+
+            const char *name = row[0] ? row[0] : "";
+            /* Не показываем саму Бинкевич в списке коллег */
+            if (SEARCH_NAME && strcmp(name, SEARCH_NAME) == 0) continue;
+
+            const char *shift = rlen > 1 && row[1] ? row[1] : "";
+
+            if (!first) APPEND(",");
+            first = 0;
+            char *e_name = escape_json(name);
+            char *e_shift = escape_json(shift);
+            APPEND("{\"name\":\"%s\",\"shift\":\"%s\"}",
+                   e_name ? e_name : "", e_shift ? e_shift : "");
+            free(e_name);
+            free(e_shift);
+        }
+        free_rows(rows, row_lens, row_count);
+        free(response);
+    }
+
+    APPEND("]}");
+
+    char header[512];
+    int hlen = snprintf(header, sizeof(header),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json; charset=UTF-8\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n", len);
+    write(client_fd, header, hlen);
+    write(client_fd, json, len);
+    shutdown(client_fd, SHUT_WR);
+    close(client_fd);
+
+    free(json);
+    #undef APPEND
+}
+
 static void build_and_save_cache(void) {
     char sheets[MAX_SHEETS][MAX_SHEET_NAME];
     int sheet_count = get_visible_sheets(sheets, MAX_SHEETS);
-    
+    log_msg("build_and_save_cache: started, visible sheets=%d", sheet_count);
+
     size_t cap = 65536;
     char *html = malloc(cap);
     size_t len = 0;
@@ -295,7 +463,10 @@ static void build_and_save_cache(void) {
             free(encoded_range);
             
             char *response = fetch_url(url);
-            if (!response) continue;
+            if (!response) {
+                log_msg("build_and_save_cache: fetch failed for sheet '%s'", sheets[i]);
+                continue;
+            }
             
             const char *values_pos = strstr(response, "\"values\"");
             if (!values_pos) { free(response); continue; }
@@ -318,6 +489,7 @@ static void build_and_save_cache(void) {
             }
             
             if (found_idx < 0) {
+                log_msg("build_and_save_cache: name '%s' not found in sheet '%s'", SEARCH_NAME, sheets[i]);
                 free_rows(rows, row_lens, row_count);
                 free(response);
                 continue;
@@ -474,7 +646,47 @@ int main(void) {
         socklen_t client_len = sizeof(client_addr);
         int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
         if (client_fd < 0) continue;
-        
+
+        int force_refresh = 0;
+        int is_cabinet_api = 0;
+        char cabinet_month[256] = "";
+        char cabinet_cabinet[128] = "";
+        int cabinet_day = 0;
+        {
+            char reqbuf[2048];
+            ssize_t n = read(client_fd, reqbuf, sizeof(reqbuf) - 1);
+            if (n > 0) {
+                reqbuf[n] = '\0';
+                if (strstr(reqbuf, "refresh=1") || strstr(reqbuf, "force=1")) {
+                    force_refresh = 1;
+                }
+                if (strstr(reqbuf, "GET /api/cabinet")) {
+                    is_cabinet_api = 1;
+                    char *q = strstr(reqbuf, "?");
+                    if (q) {
+                        sscanf(q, "?month=%255[^&]&cabinet=%127[^&]&day=%d",
+                               cabinet_month, cabinet_cabinet, &cabinet_day);
+                    }
+                }
+            }
+        }
+
+        if (force_refresh) {
+            log_msg("HTTP: forced cache refresh requested");
+            build_and_save_cache();
+        }
+
+        if (is_cabinet_api) {
+            char *month = url_decode(cabinet_month);
+            char *cab = url_decode(cabinet_cabinet);
+            log_msg("HTTP: /api/cabinet month=%s cabinet=%s day=%d",
+                    month ? month : "(null)", cab ? cab : "(null)", cabinet_day);
+            handle_cabinet_colleagues(client_fd, month, cab, cabinet_day);
+            free(month);
+            free(cab);
+            continue;
+        }
+
         size_t html_len = 0;
         char *html = read_cache_file(&html_len);
         
