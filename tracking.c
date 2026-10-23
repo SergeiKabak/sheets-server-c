@@ -1820,7 +1820,7 @@ static void api_tracking_diag(int fd, const char *query) {
                 if (!p) break;
                 while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
                 if (*p != '"') break;
-                p++;
+                p++;                       /* пропускаем открывающую кавычку */
                 const char *st = p;
                 while (*p && *p != '"') p++;
                 size_t len = (size_t)(p - st);
