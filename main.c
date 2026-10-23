@@ -519,7 +519,7 @@ static char **copy_row(char **src, int len) {
 }
 
 /* Собирает данные каждого видимого листа(=месяца) в массив. Возвращает кол-во. */
-static int build_months(MonthEntry *out, int max) {
+static int build_months(MonthEntry *out, int max, FILE *idx) {
     char sheets[MAX_SHEETS][MAX_SHEET_NAME];
     int sheet_count = get_visible_sheets(sheets, MAX_SHEETS);
     fprintf(stderr, "[updater] visible sheets=%d SEARCH_NAME='%s'\n", sheet_count, SEARCH_NAME ? SEARCH_NAME : "");
@@ -557,6 +557,29 @@ static int build_months(MonthEntry *out, int max) {
             }
         }
         if (found_idx < 0) { free_rows(rows, row_lens, row_count); free(response); continue; }
+
+        /* Индекс кабинетов по ВСЕМ строкам листа.
+           У человека две строки: утренняя (в графе C имя) и вечерняя
+           (имя пустое — наследуется от предыдущей строки). */
+        if (idx) {
+            const char *cur_name = "";
+            for (int r = 0; r < row_count; r++) {
+                char **row = (char **)rows[r];
+                int rlen = row_lens[r];
+                if (rlen < 3) continue;
+                const char *nm = row[0] ? row[0] : "";
+                if (*nm) cur_name = nm;
+                if (!*cur_name) continue;
+                if (SEARCH_NAME && strcmp(cur_name, SEARCH_NAME) == 0) continue;
+                const char *shift = row[1] ? row[1] : "";
+                for (int d = 2; d < rlen; d++) {
+                    const char *cabinet = row[d] ? row[d] : "";
+                    if (!*cabinet) continue;
+                    fprintf(idx, "%s\t%d\t%s\t%s\t%s\n",
+                            sheets[i], d - 1, cabinet, cur_name, shift);
+                }
+            }
+        }
 
         MonthEntry *m = &out[count];
         memset(m, 0, sizeof(MonthEntry));
@@ -603,36 +626,42 @@ static int save_months(MonthEntry *mo, int count) {
 
 static char *json_escape(const char *s);
 
-/* Сохраняет текстовый индекс кабинетов: месяц\tday\tкабинет\тимя\tshift
-   Обновляется в background_updater вместе с месяцами. */
-static void save_cabinet_index(MonthEntry *mo, int count) {
-    FILE *fp = fopen(CABINET_INDEX_FILE, "w");
-    if (!fp) {
-        fprintf(stderr, "[cabinet] cannot open %s for writing\n", CABINET_INDEX_FILE);
-        return;
-    }
-    for (int i = 0; i < count; i++) {
-        const char *month = mo[i].title;
-        char **shifts[2] = { mo[i].shift1, mo[i].shift2 };
-        int lens[2] = { mo[i].shift1_len, mo[i].shift2_len };
-        for (int s = 0; s < 2; s++) {
-            char **row = shifts[s];
-            int len = lens[s];
-            if (!row || len < 3) continue;
-            const char *name = row[0] ? row[0] : "";
-            if (!*name) continue;
-            if (SEARCH_NAME && strcmp(name, SEARCH_NAME) == 0) continue;
-            const char *shift = row[1] ? row[1] : "";
-            for (int d = 2; d < len; d++) {
-                const char *cabinet = row[d] ? row[d] : "";
-                if (!*cabinet) continue;
-                int day = d - 1;
-                fprintf(fp, "%s\t%d\t%s\t%s\t%s\n", month, day, cabinet, name, shift);
-            }
+/* Разбирает смену вида "7:30-14:40" в минуты от полуночи.
+   Возвращает 0 при успехе, -1 если формат не распознан. */
+static int parse_shift(const char *s, int *start, int *end) {
+    if (!s || !*s) return -1;
+    char tmp[64];
+    size_t j = 0;
+    for (size_t i = 0; s[i] && j + 1 < sizeof(tmp); i++) {
+        unsigned char ch = (unsigned char)s[i];
+        if (ch == ' ') continue;
+        if (ch >= 0xC0) {
+            /* начало UTF-8 последовательности (тире – —) -> один '-' */
+            tmp[j++] = '-';
+            while (s[i + 1] && ((unsigned char)s[i + 1] & 0xC0) == 0x80) i++;
+            continue;
         }
+        if (ch >= 0x80) continue;
+        tmp[j++] = (char)ch;
     }
-    fclose(fp);
-    fprintf(stderr, "[cabinet] index saved (%d months)\n", count);
+    tmp[j] = '\0';
+    int h1 = 0, m1 = 0, h2 = 0, m2 = 0;
+    if (sscanf(tmp, "%d:%d-%d:%d", &h1, &m1, &h2, &m2) != 4) return -1;
+    *start = h1 * 60 + m1;
+    *end   = h2 * 60 + m2;
+    if (*end < *start) { int t = *start; *start = *end; *end = t; }
+    return 0;
+}
+
+/* Пересекаются ли две смены по времени (7:30-14:40 и 8:00-14:30 -> да).
+   Если формат не распознан — сравниваем строки. */
+static int shifts_overlap(const char *a, const char *b) {
+    int s1, e1, s2, e2;
+    if (parse_shift(a, &s1, &e1) != 0 || parse_shift(b, &s2, &e2) != 0) {
+        if (!a || !b) return 0;
+        return strcmp(a, b) == 0;
+    }
+    return s1 < e2 && s2 < e1;
 }
 
 /* Читает готовый индекс и возвращает JSON-массив коллег для месяца/дня/кабинета.
@@ -648,6 +677,9 @@ static int find_cabinet_colleagues_from_index(const char *month, int day,
     int off = 0;
     int first = 1;
     char line[1024];
+    char emitted_names[64][256];
+    char emitted_shifts[64][128];
+    int emitted = 0;
     while (fgets(line, sizeof(line), fp)) {
         char m[128] = "";
         int d = 0;
@@ -694,8 +726,22 @@ static int find_cabinet_colleagues_from_index(const char *month, int day,
         if (strcmp(m, month) != 0) continue;
         if (d != day) continue;
         if (strcmp(c, cabinet) != 0) continue;
-        // фильтр по смене, если передана
-        if (shift && *shift && strcmp(s, shift) != 0) continue;
+        // фильтр по смене: коллега должен работать в пересекающемся интервале
+        if (shift && *shift && !shifts_overlap(s, shift)) continue;
+
+        /* убираем дубли (один человек может встретиться в двух строках) */
+        int dup = 0;
+        for (int q = 0; q < emitted; q++) {
+            if (strcmp(emitted_names[q], name) == 0 &&
+                strcmp(emitted_shifts[q], s) == 0) { dup = 1; break; }
+        }
+        if (dup) continue;
+
+        if (emitted < 64) {
+            snprintf(emitted_names[emitted], sizeof(emitted_names[0]), "%s", name);
+            snprintf(emitted_shifts[emitted], sizeof(emitted_shifts[0]), "%s", s);
+            emitted++;
+        }
 
         if (!first) {
             off += snprintf(out + off, outcap - off, ",");
@@ -1445,9 +1491,10 @@ static void background_updater(void) {
     MonthEntry mo[MAX_MONTHS];
     for (;;) {
         memset(mo, 0, sizeof(mo));
-        int c = build_months(mo, MAX_MONTHS);
+        FILE *idx = fopen(CABINET_INDEX_FILE, "w");
+        int c = build_months(mo, MAX_MONTHS, idx);
+        if (idx) { fclose(idx); fprintf(stderr, "[cabinet] index saved\n"); }
         save_months(mo, c);
-        save_cabinet_index(mo, c);
         fprintf(stderr, "[updater] months cached: %d\n", c);
         sleep(CACHE_TTL);
     }
