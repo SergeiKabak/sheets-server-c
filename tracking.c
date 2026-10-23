@@ -564,8 +564,28 @@ static int detect_api_disabled(const char *resp) {
 /* ---------- Google Sheets: чтение листа ---------- */
 /* Возвращает JSON ответа values API или NULL. */
 static char *sheets_get_values(const char *sheet_name) {
+    /* Чтение возможно и по публичному API key (если таблица доступна на чтение),
+       запись — только через OAuth2 Service Account. Пробуем сначала OAuth2. */
     const char *token = sa_access_token();
-    if (!token) return NULL;
+    if (!token) {
+        const char *apikey = getenv("GOOGLE_API_KEY");
+        if (apikey && *apikey) {
+            char url2[2048];
+            char *enc2 = trk_url_encode(sheet_name);
+            if (enc2) {
+                snprintf(url2, sizeof(url2),
+                    "%s/v4/spreadsheets/%s/values/%%27%s%%27!A:F?key=%s",
+                    g_api_base, getenv("TRACKING_SHEET_ID") ? getenv("TRACKING_SHEET_ID") : "",
+                    enc2, apikey);
+                free(enc2);
+                int st2 = 0;
+                char *r2 = trk_curl("GET", url2, NULL, NULL, NULL, &st2);
+                if (r2 && st2 == 200) return r2;
+                free(r2);
+            }
+        }
+        return NULL;
+    }
 
     char url[2048];
     /* Имя листа с пробелами оборачиваем в одинарные кавычки (A1-нотация),
@@ -1633,6 +1653,18 @@ static void api_tracking_diag(int fd, const char *query) {
                       date, ts);
     }
     free(w);
+
+    /* 7) Подсказка по действиям */
+    if (strstr(g_last_error, "DISABLED")) {
+        o += snprintf(out + o, cap - o,
+            ",\"hint\":\"Enable Google Sheets API in the project that owns the "
+            "Service Account (project id women-health-684ad). The API key project "
+            "already has it enabled, but the OAuth2 consumer project does not.\"");
+    } else if (strstr(g_last_error, "not accessible")) {
+        o += snprintf(out + o, cap - o,
+            ",\"hint\":\"Share the Time tracking spreadsheet with the Service "
+            "Account email as Editor.\"");
+    }
 
     if (g_last_error[0]) {
         char *ee = json_escape_local(g_last_error);
