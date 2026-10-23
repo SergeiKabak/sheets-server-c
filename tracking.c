@@ -647,6 +647,37 @@ static int sheets_append_row(const char *sheet_name, const char *values_json) {
 
 /* ---------- Google Sheets: обновление диапазона ---------- */
 /* A1-нотация, например "Лист1!A5:F5" */
+/* Обновляет диапазон, принимая ГОТОВЫЙ JSON-объект {"values":[...]}
+   (используется для записи нескольких строк сразу). */
+static int sheets_update_values_raw(const char *sheet_name, const char *a1_suffix,
+                                    const char *values_object) {
+    const char *token = sa_access_token();
+    if (!token) return -1;
+
+    char url[2048];
+    char *enc = trk_url_encode(sheet_name);
+    if (!enc) return -1;
+    snprintf(url, sizeof(url),
+        "%s/v4/spreadsheets/%s/values/%%27%s%%27%s"
+        "?valueInputOption=USER_ENTERED",
+        g_api_base, g_sheet_id, enc, a1_suffix);
+    free(enc);
+
+    int status = 0;
+    char *resp = trk_curl("PUT", url, "application/json", values_object, token, &status);
+    if (!resp) return -1;
+    if (status != 200) {
+        if (!detect_api_disabled(resp))
+            snprintf(g_last_error, sizeof(g_last_error),
+                     "sheets_update_values_raw status=%d resp=%.160s", status, resp);
+        trk_log("%s", g_last_error);
+        free(resp);
+        return -1;
+    }
+    free(resp);
+    return 0;
+}
+
 static int sheets_update_range(const char *sheet_name, const char *a1_suffix,
                                const char *values_json) {
     const char *token = sa_access_token();
@@ -702,6 +733,12 @@ static int sheets_create_sheet(const char *sheet_name) {
     char *resp = trk_curl("POST", url, "application/json", body, token, &status);
     if (!resp) return -1;
     if (status != 200) {
+        /* Вкладка уже существует — это не ошибка */
+        if (strstr(resp, "already exists")) {
+            trk_log("sheet '%s' already exists", sheet_name);
+            free(resp);
+            return 0;
+        }
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
                      "sheets_create_sheet status=%d resp=%.160s", status, resp);
@@ -982,6 +1019,16 @@ static int row_is_empty(TRow *r) {
     return 1;
 }
 
+/* Нормализует время к виду ЧЧ:ММ (Google может вернуть "8:00") */
+static void normalize_time(const char *in, char *out, size_t cap) {
+    int h = 0, m = 0;
+    if (sscanf(in, "%d:%d", &h, &m) == 2) {
+        snprintf(out, cap, "%02d:%02d", h, m);
+    } else {
+        snprintf(out, cap, "%s", in ? in : "");
+    }
+}
+
 /* Нормализует дату к виду ДД.ММ.ГГГГ */
 static void normalize_date(const char *in, char *out, size_t cap) {
     int d = 0, m = 0, y = 0;
@@ -1062,24 +1109,88 @@ static int load_or_create_month_sheet(const char *month_sheet, TRows *rows) {
     if (resp) {
         parse_values_json(resp, rows);
         free(resp);
-        return 0;
+    } else {
+        /* листа нет — создаём и перечитываем (пустой лист) */
+        if (sheets_create_sheet(month_sheet) != 0) return -1;
+        char *r2 = sheets_get_values(month_sheet);
+        if (r2) { parse_values_json(r2, rows); free(r2); }
     }
-    /* листа нет — создаём */
-    if (sheets_create_sheet(month_sheet) != 0) return -1;
 
-    /* добавляем заголовки таблицы */
-    static const char *HEAD[6] = {
-        "Дата", "Время прихода", "Время ухода", "Время в часах", "Ставка в час", "Сумма за день"
-    };
-    char vals[6][64];
-    for (int c = 0; c < 6; c++) snprintf(vals[c], 64, "%s", HEAD[c]);
-    const char *ptr[6] = { vals[0], vals[1], vals[2], vals[3], vals[4], vals[5] };
-    char *json = build_values_json(ptr);
-    if (json) {
-        sheets_update_range(month_sheet, "!A1:F1", json);
-        free(json);
+    /* Если лист пустой (или состоит только из заголовка) — добавляем/проверяем
+       строку заголовков колонок. */
+    int need_header = 1;
+    if (rows->count > 0) {
+        const char *a = rows->row[0].cell[0];
+        if (a && strcmp(a, "Дата") == 0) need_header = 0;
+    }
+    if (need_header) {
+        TRow *h = trows_add(rows);
+        static const char *HEAD[6] = {
+            "Дата", "Время прихода", "Время ухода",
+            "Время в часах", "Ставка в час", "Сумма за день"
+        };
+        for (int cc = 0; cc < 6; cc++) {
+            free(h->cell[cc]);
+            h->cell[cc] = strdup(HEAD[cc]);
+        }
     }
     return 0;
+}
+
+/* Находит последнюю строку блока сотрудника (индекс) или -1 */
+static int find_block_end(TRows *t, int block_idx) {
+    int last = block_idx;
+    for (int i = block_idx + 1; i < t->count; i++) {
+        if (row_is_empty(&t->row[i])) break;
+        last = i;
+    }
+    return last;
+}
+
+/* Вставляет пустую строку в позицию idx */
+static void trows_insert(TRows *t, int idx) {
+    if (idx < 0) idx = 0;
+    if (idx > t->count) idx = t->count;
+    trows_add(t);
+    for (int i = t->count - 1; i > idx; i--) {
+        t->row[i] = t->row[i - 1];
+    }
+    for (int cc = 0; cc < 6; cc++) {
+        free(t->row[idx].cell[cc]);
+        t->row[idx].cell[cc] = strdup("");
+    }
+}
+
+/* Полностью перезаписывает лист указанными строками (A1:F{n}).
+   Нужна, чтобы вставлять строки в середину (новый сотрудник / новый день)
+   и сохранять порядок блоков. */
+static int sheets_write_rows(const char *sheet_name, TRows *rows) {
+    if (rows->count == 0) return 0;
+
+    size_t cap = 1024 + (size_t)rows->count * 256;
+    char *body = malloc(cap);
+    if (!body) return -1;
+    size_t o = 0;
+    /* Строим полный объект {"values":[[...],[...]]} — ровно то, что ждёт API.
+       Обёртка добавляется здесь, чтобы не получить двойную обёртку
+       ("Invalid values[0][0]: list_value"). */
+    o += snprintf(body + o, cap - o, "{\"values\":[");
+    for (int i = 0; i < rows->count; i++) {
+        o += snprintf(body + o, cap - o, "%s[", i ? "," : "");
+        for (int cc = 0; cc < 6; cc++) {
+            char *esc = json_escape_local(rows->row[i].cell[cc]);
+            o += snprintf(body + o, cap - o, "%s\"%s\"", cc ? "," : "", esc ? esc : "");
+            free(esc);
+        }
+        o += snprintf(body + o, cap - o, "]");
+    }
+    o += snprintf(body + o, cap - o, "]}");
+
+    char suffix[64];
+    snprintf(suffix, sizeof(suffix), "!A1:F%d", rows->count);
+    int rc = sheets_update_values_raw(sheet_name, suffix, body);
+    free(body);
+    return rc;
 }
 
 /* Обновляет строку листа (1-based номер строки в Google Sheets) */
@@ -1183,31 +1294,44 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
             free(name);
             goto done;
         }
+        double rate = employee_rate_by_name(name);
+        char rate_buf[32];
+        snprintf(rate_buf, sizeof(rate_buf), "%.0f", rate);
+
         if (date_row >= 0) {
-            /* строка есть, но время прихода пустое — заполняем */
+            /* строка за сегодня уже есть, но время прихода пустое */
             free(rows.row[date_row].cell[1]);
             rows.row[date_row].cell[1] = strdup(time_s);
-            const char *cells[6];
-            for (int c = 0; c < 6; c++) cells[c] = rows.row[date_row].cell[c];
-            if (write_row(date_row + 1, cells) != 0) {
-                trk_reply(fd, "500 Internal Server Error",
-                          "{\"ok\":false,\"error\":\"write failed\"}");
-                trows_free(&rows); free(name);
-                goto done;
+            if (cell_empty(rows.row[date_row].cell[4])) {
+                free(rows.row[date_row].cell[4]);
+                rows.row[date_row].cell[4] = strdup(rate_buf);
             }
+        } else if (block >= 0) {
+            /* блок сотрудника есть — новая строка в конец его блока */
+            int last = find_block_end(&rows, block);
+            trows_insert(&rows, last + 1);
+            int ni = last + 1;
+            free(rows.row[ni].cell[0]); rows.row[ni].cell[0] = strdup(date);
+            free(rows.row[ni].cell[1]); rows.row[ni].cell[1] = strdup(time_s);
+            free(rows.row[ni].cell[4]); rows.row[ni].cell[4] = strdup(rate_buf);
         } else {
-            /* новая строка: [дата, приход, "", "", ставка, ""] */
-            const char *cells[6] = { date, time_s, "", "", "", "" };
-            char rate_buf[32];
-            double rate = employee_rate_by_name(name);
-            snprintf(rate_buf, sizeof(rate_buf), "%.0f", rate);
-            cells[4] = rate_buf;
-            if (append_row(cells) != 0) {
-                trk_reply(fd, "500 Internal Server Error",
-                          "{\"ok\":false,\"error\":\"append failed\"}");
-                trows_free(&rows); free(name);
-                goto done;
-            }
+            /* новый сотрудник — блок: пустая строка + ФИО + строка дня */
+            trows_insert(&rows, rows.count);
+            trows_insert(&rows, rows.count);
+            int ni = rows.count - 1;
+            free(rows.row[ni].cell[0]); rows.row[ni].cell[0] = strdup(name);
+            trows_insert(&rows, rows.count);
+            int di = rows.count - 1;
+            free(rows.row[di].cell[0]); rows.row[di].cell[0] = strdup(date);
+            free(rows.row[di].cell[1]); rows.row[di].cell[1] = strdup(time_s);
+            free(rows.row[di].cell[4]); rows.row[di].cell[4] = strdup(rate_buf);
+        }
+
+        if (sheets_write_rows(g_current_sheet, &rows) != 0) {
+            trk_reply(fd, "500 Internal Server Error",
+                      "{\"ok\":false,\"error\":\"write failed\"}");
+            trows_free(&rows); free(name);
+            goto done;
         }
         char msg[512];
         char *en = json_escape_local(name);
@@ -1251,10 +1375,14 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
         rows.row[date_row].cell[3] = strdup(hours_buf);
         free(rows.row[date_row].cell[5]);
         rows.row[date_row].cell[5] = strdup(sum_buf);
+        if (cell_empty(rows.row[date_row].cell[4])) {
+            char rb[32];
+            snprintf(rb, sizeof(rb), "%.0f", rate);
+            free(rows.row[date_row].cell[4]);
+            rows.row[date_row].cell[4] = strdup(rb);
+        }
 
-        const char *cells[6];
-        for (int c = 0; c < 6; c++) cells[c] = rows.row[date_row].cell[c];
-        if (write_row(date_row + 1, cells) != 0) {
+        if (sheets_write_rows(g_current_sheet, &rows) != 0) {
             trk_reply(fd, "500 Internal Server Error",
                       "{\"ok\":false,\"error\":\"write failed\"}");
             trows_free(&rows); free(name);
