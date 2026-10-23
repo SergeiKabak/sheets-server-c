@@ -41,6 +41,8 @@ static char g_current_sheet[256] = "";
 /* Базовые URL Google API (переопределяются через окружение — используется в тестах) */
 static char *g_api_base = NULL;
 static char *g_drive_base = NULL;
+/* Последняя ошибка (для диагностики) */
+static char g_last_error[512] = "";
 
 static void trk_log(const char *fmt, ...) {
     va_list ap;
@@ -335,7 +337,10 @@ static const char *sa_access_token(void) {
     char *pkey  = json_get_string(g_sa_json, "private_key");
     char *turi  = json_get_string(g_sa_json, "token_uri");
     if (!email || !pkey) {
-        trk_log("service account JSON invalid (client_email/private_key missing)");
+        snprintf(g_last_error, sizeof(g_last_error),
+                 "service account JSON invalid: client_email=%s private_key=%s",
+                 email ? "ok" : "MISSING", pkey ? "ok" : "MISSING");
+        trk_log("%s", g_last_error);
         free(email); free(pkey); free(turi);
         return NULL;
     }
@@ -403,7 +408,10 @@ static const char *sa_access_token(void) {
     free(email); free(pkey); free(turi); free(h); free(p); free(sig_b64);
 
     if (!resp || status != 200) {
-        trk_log("token request failed status=%d body=%.200s", status, resp ? resp : "");
+        snprintf(g_last_error, sizeof(g_last_error),
+                 "token request failed status=%d body=%.180s",
+                 status, resp ? resp : "(no response)");
+        trk_log("%s", g_last_error);
         free(resp);
         return NULL;
     }
@@ -413,7 +421,11 @@ static const char *sa_access_token(void) {
     char *e = json_get_string(resp, "expires_in");
     if (e) { long v = atol(e); if (v > 60) exp = v; free(e); }
     free(resp);
-    if (!tok) { trk_log("no access_token in response"); return NULL; }
+    if (!tok) {
+        snprintf(g_last_error, sizeof(g_last_error), "no access_token in response");
+        trk_log("%s", g_last_error);
+        return NULL;
+    }
 
     free(g_token);
     g_token = tok;
@@ -1282,7 +1294,8 @@ void tracking_handle(int fd, const char *method, const char *path, const char *b
     /* Первый вызов: находим существующую таблицу или создаём новую
        (владельцем будет Service Account). */
     if (!g_sheet_id) {
-        if (tracking_ensure_spreadsheet() != 0) {
+        int rc = tracking_ensure_spreadsheet();
+        if (rc != 0 && strcmp(path, "/diag/tracking") != 0) {
             trk_reply(fd, "503 Service Unavailable",
                       "{\"ok\":false,\"error\":\"tracking sheet not configured\"}");
             return;
@@ -1405,7 +1418,9 @@ static int tracking_ensure_spreadsheet(void) {
             if (share_email && *share_email) drive_share(env_id, share_email, "writer");
             return 0;
         }
-        trk_log("TRACKING_SHEET_ID=%s not accessible, will try local cache/create", env_id);
+        snprintf(g_last_error, sizeof(g_last_error),
+                 "TRACKING_SHEET_ID=%s not accessible with current credentials", env_id);
+        trk_log("%s", g_last_error);
     }
 
     /* 2) ID из локального кэша (создан ранее этим же сервис-аккаунтом) */
@@ -1428,7 +1443,10 @@ static int tracking_ensure_spreadsheet(void) {
     /* 3) создаём новую таблицу */
     char *new_id = sheets_create_spreadsheet(title);
     if (!new_id) {
-        trk_log("cannot create spreadsheet (need Service Account with spreadsheets scope)");
+        if (!g_last_error[0])
+            snprintf(g_last_error, sizeof(g_last_error),
+                     "cannot create spreadsheet (need Service Account with spreadsheets scope)");
+        trk_log("%s", g_last_error);
         return -1;
     }
     g_sheet_id = new_id;
@@ -1469,6 +1487,13 @@ static void api_tracking_diag(int fd, const char *query) {
     /* 3) таблица */
     o += snprintf(out + o, cap - o, ",\"sheet_id\":\"%s\"",
                   g_sheet_id ? g_sheet_id : "");
+    o += snprintf(out + o, cap - o, ",\"env_sheet_id\":\"%s\"",
+                  getenv("TRACKING_SHEET_ID") ? getenv("TRACKING_SHEET_ID") : "");
+    o += snprintf(out + o, cap - o, ",\"share_email\":\"%s\"",
+                  getenv("TRACKING_SHARE_EMAIL") ? getenv("TRACKING_SHARE_EMAIL") : "");
+    o += snprintf(out + o, cap - o, ",\"emp_map\":\"%s\"",
+                  getenv("EMPLOYEE_MAP") ? "set" : "MISSING");
+    o += snprintf(out + o, cap - o, ",\"rate\":\"%.0f\"", g_default_rate);
 
     /* 4) список вкладок */
     if (g_sheet_id && tok) {
@@ -1555,6 +1580,11 @@ static void api_tracking_diag(int fd, const char *query) {
     }
     free(w);
 
+    if (g_last_error[0]) {
+        char *ee = json_escape_local(g_last_error);
+        o += snprintf(out + o, cap - o, ",\"last_error\":\"%s\"", ee ? ee : "");
+        free(ee);
+    }
     o += snprintf(out + o, cap - o, "}");
     trk_reply(fd, "200 OK", out);
     free(out);
