@@ -1803,6 +1803,9 @@ static void api_tracking_diag(int fd, const char *query) {
     APPEND(",\"emp_map\":\"%s\"",
                   getenv("EMPLOYEE_MAP") ? "set" : "MISSING");
     APPEND(",\"rate\":\"%.0f\"", g_default_rate);
+    APPEND(",\"rates_map\":\"%s\"",
+                  getenv("EMPLOYEE_RATES") ? "set" : "MISSING");
+    APPEND(",\"tz_offset\":\"%d\"", g_tz_offset);
 
     /* 4) список вкладок */
     if (g_sheet_id && tok) {
@@ -1905,6 +1908,10 @@ static void api_tracking_diag(int fd, const char *query) {
             ",\"hint\":\"Service Account cannot create new spreadsheets. "
             "Set TRACKING_SHEET_ID to the existing Time tracking spreadsheet id "
             "(1zhWZRFI6GYYnh6PNQn37KiSyPLvjkSwJz-CKwF0xEnw).\"");
+    } else if (!g_default_rate) {
+        APPEND(",\"hint\":\"HOURLY_RATE is 0 - set it (e.g. 500) so the "
+               "payment column is calculated. Also set EMPLOYEE_MAP with your "
+               "Telegram chat id to map you to the full name in the sheet.\"");
     } else if (!g_sheet_id[0]) {
         o += snprintf(out + o, cap - o,
             ",\"hint\":\"TRACKING_SHEET_ID is not set. Set it to the Time "
