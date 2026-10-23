@@ -204,7 +204,11 @@ static char *trk_curl(const char *method, const char *url,
                       const char *content_type, const char *body,
                       const char *bearer, int *status) {
     if (status) *status = 0;
-    size_t cmdlen = strlen(url) + (body ? strlen(body) : 0) + 1024;
+    /* ВАЖНО: учитываем длину всех частей команды, иначе snprintf обрежет
+       строку (например, длинный Bearer-токен) и shell получит битую команду. */
+    size_t cmdlen = strlen(url) + (body ? strlen(body) : 0) +
+                     (bearer ? strlen(bearer) : 0) +
+                     (content_type ? strlen(content_type) : 0) + 2048;
     char *cmd = malloc(cmdlen);
     if (!cmd) return NULL;
 
@@ -228,15 +232,25 @@ static char *trk_curl(const char *method, const char *url,
     }
 
     size_t o = 0;
-    o += snprintf(cmd + o, cmdlen - o,
-        "curl -sS --max-time 25 -X %s -w '\\n%%{http_code}' ", method);
+    /* APPEND безопасно: если места не хватит — команда обрежется, но не выйдет
+       за пределы буфера и не станет «битой». */
+    #define APPEND(...) do { \
+        int _n = snprintf(cmd + o, cmdlen - o, __VA_ARGS__); \
+        if (_n < 0) break; \
+        size_t _need = (size_t)_n; \
+        if (_need >= cmdlen - o) { o = cmdlen - 1; break; } \
+        o += _need; \
+    } while(0)
+
+    APPEND("curl -sS --max-time 25 -X %s -w '\\n%%{http_code}' ", method);
     if (bearer && *bearer)
-        o += snprintf(cmd + o, cmdlen - o, "-H 'Authorization: Bearer %s' ", bearer);
+        APPEND("-H 'Authorization: Bearer %s' ", bearer);
     if (content_type)
-        o += snprintf(cmd + o, cmdlen - o, "-H 'Content-Type: %s' ", content_type);
+        APPEND("-H 'Content-Type: %s' ", content_type);
     if (qbody)
-        o += snprintf(cmd + o, cmdlen - o, "--data-binary %s ", qbody);
-    o += snprintf(cmd + o, cmdlen - o, "'%s'", url);
+        APPEND("--data-binary %s ", qbody);
+    APPEND("'%s'", url);
+    #undef APPEND
 
     FILE *fp = popen(cmd, "r");
     free(cmd);
@@ -523,6 +537,30 @@ static double employee_rate_by_name(const char *name) {
     return r > 0 ? r : g_default_rate;
 }
 
+/* Проверяет, содержит ли ответ Google ошибку "API не включён" и заполняет
+   g_last_error понятным текстом. Возвращает 1, если это тот случай. */
+static int detect_api_disabled(const char *resp) {
+    if (!resp) return 0;
+    if (strstr(resp, "SERVICE_DISABLED") ||
+        (strstr(resp, "has not been used in project") && strstr(resp, "or it is disabled"))) {
+        const char *p = strstr(resp, "consumer\": \"projects/");
+        char proj[64] = "";
+        if (p) {
+            p += 21;
+            size_t i = 0;
+            while (*p && *p != '"' && i < sizeof(proj) - 1) proj[i++] = *p++;
+            proj[i] = '\0';
+        }
+        snprintf(g_last_error, sizeof(g_last_error),
+                 "Google Sheets API is DISABLED in project %s. "
+                 "Enable it: https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=%s",
+                 proj[0] ? proj : "(unknown)", proj[0] ? proj : "YOUR_PROJECT");
+        trk_log("%s", g_last_error);
+        return 1;
+    }
+    return 0;
+}
+
 /* ---------- Google Sheets: чтение листа ---------- */
 /* Возвращает JSON ответа values API или NULL. */
 static char *sheets_get_values(const char *sheet_name) {
@@ -543,7 +581,10 @@ static char *sheets_get_values(const char *sheet_name) {
     char *resp = trk_curl("GET", url, NULL, NULL, token, &status);
     if (!resp) return NULL;
     if (status != 200) {
-        trk_log("sheets_get_values status=%d resp=%.200s", status, resp);
+        if (!detect_api_disabled(resp))
+            snprintf(g_last_error, sizeof(g_last_error),
+                     "sheets_get_values status=%d resp=%.160s", status, resp);
+        trk_log("%s", g_last_error);
         free(resp);
         return NULL;
     }
@@ -572,7 +613,10 @@ static int sheets_append_row(const char *sheet_name, const char *values_json) {
     char *resp = trk_curl("POST", url, "application/json", body, token, &status);
     if (!resp) return -1;
     if (status != 200) {
-        trk_log("sheets_append_row status=%d resp=%.300s", status, resp);
+        if (!detect_api_disabled(resp))
+            snprintf(g_last_error, sizeof(g_last_error),
+                     "sheets_append_row status=%d resp=%.160s", status, resp);
+        trk_log("%s", g_last_error);
         free(resp);
         return -1;
     }
@@ -606,7 +650,10 @@ static int sheets_update_range(const char *sheet_name, const char *a1_suffix,
     char *resp = trk_curl("PUT", url, "application/json", body, token, &status);
     if (!resp) return -1;
     if (status != 200) {
-        trk_log("sheets_update_range status=%d resp=%.300s", status, resp);
+        if (!detect_api_disabled(resp))
+            snprintf(g_last_error, sizeof(g_last_error),
+                     "sheets_update_range status=%d resp=%.160s", status, resp);
+        trk_log("%s", g_last_error);
         free(resp);
         return -1;
     }
@@ -635,7 +682,10 @@ static int sheets_create_sheet(const char *sheet_name) {
     char *resp = trk_curl("POST", url, "application/json", body, token, &status);
     if (!resp) return -1;
     if (status != 200) {
-        trk_log("sheets_create_sheet status=%d resp=%.300s", status, resp);
+        if (!detect_api_disabled(resp))
+            snprintf(g_last_error, sizeof(g_last_error),
+                     "sheets_create_sheet status=%d resp=%.160s", status, resp);
+        trk_log("%s", g_last_error);
         free(resp);
         return -1;
     }
@@ -1341,7 +1391,10 @@ static char *sheets_create_spreadsheet(const char *title) {
         "application/json", body, token, &status);
     if (!resp) return NULL;
     if (status != 200) {
-        trk_log("sheets_create_spreadsheet status=%d resp=%.300s", status, resp);
+        if (!detect_api_disabled(resp))
+            snprintf(g_last_error, sizeof(g_last_error),
+                     "sheets_create_spreadsheet status=%d resp=%.160s", status, resp);
+        trk_log("%s", g_last_error);
         free(resp);
         return NULL;
     }
@@ -1399,6 +1452,7 @@ static int sheets_sheet_exists(const char *file_id) {
     char *resp = trk_curl("GET", url, NULL, NULL, token, &status);
     if (!resp) return 0;
     int ok = (status == 200);
+    if (!ok) detect_api_disabled(resp);
     free(resp);
     return ok;
 }
