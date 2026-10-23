@@ -1674,32 +1674,42 @@ static void api_tracking_diag(int fd, const char *query) {
     char *out = malloc(cap);
     if (!out) { trk_reply(fd, "500 Internal Server Error", "{}"); return; }
     size_t o = 0;
+    /* APPEND безопасно: snprintf возвращает длину, которую БЫ записал бы,
+       поэтому при переполнении указатель o может выйти за пределы буфера. */
+    #define APPEND(...) do { \
+        if (o + 32 >= cap) break; \
+        int _n = snprintf(out + o, cap - o, __VA_ARGS__); \
+        if (_n < 0) break; \
+        size_t _need = (size_t)_n; \
+        if (_need >= cap - o) { o = cap - 1; break; } \
+        o += _need; \
+    } while(0)
 
-    o += snprintf(out + o, cap - o, "{\"ok\":true");
+    APPEND("{\"ok\":true");
 
     /* 1) наличие Service Account */
-    o += snprintf(out + o, cap - o, ",\"sa_configured\":%s", g_sa_json ? "true" : "false");
+    APPEND(",\"sa_configured\":%s", g_sa_json ? "true" : "false");
     if (g_sa_json) {
         char *em = json_get_string(g_sa_json, "client_email");
         char *ee = json_escape_local(em ? em : "");
-        o += snprintf(out + o, cap - o, ",\"sa_email\":\"%s\"", ee ? ee : "");
+        APPEND(",\"sa_email\":\"%s\"", ee ? ee : "");
         free(ee); free(em);
     }
 
     /* 2) получение access token */
     const char *tok = sa_access_token();
-    o += snprintf(out + o, cap - o, ",\"token_ok\":%s", tok ? "true" : "false");
+    APPEND(",\"token_ok\":%s", tok ? "true" : "false");
 
     /* 3) таблица */
-    o += snprintf(out + o, cap - o, ",\"sheet_id\":\"%s\"",
+    APPEND(",\"sheet_id\":\"%s\"",
                   g_sheet_id ? g_sheet_id : "");
-    o += snprintf(out + o, cap - o, ",\"env_sheet_id\":\"%s\"",
+    APPEND(",\"env_sheet_id\":\"%s\"",
                   getenv("TRACKING_SHEET_ID") ? getenv("TRACKING_SHEET_ID") : "");
-    o += snprintf(out + o, cap - o, ",\"share_email\":\"%s\"",
+    APPEND(",\"share_email\":\"%s\"",
                   getenv("TRACKING_SHARE_EMAIL") ? getenv("TRACKING_SHARE_EMAIL") : "");
-    o += snprintf(out + o, cap - o, ",\"emp_map\":\"%s\"",
+    APPEND(",\"emp_map\":\"%s\"",
                   getenv("EMPLOYEE_MAP") ? "set" : "MISSING");
-    o += snprintf(out + o, cap - o, ",\"rate\":\"%.0f\"", g_default_rate);
+    APPEND(",\"rate\":\"%.0f\"", g_default_rate);
 
     /* 4) список вкладок */
     if (g_sheet_id && tok) {
@@ -1708,7 +1718,7 @@ static void api_tracking_diag(int fd, const char *query) {
                  g_api_base, g_sheet_id);
         int status = 0;
         char *resp = trk_curl("GET", url, NULL, NULL, tok, &status);
-        o += snprintf(out + o, cap - o, ",\"tabs\":[");
+        APPEND(",\"tabs\":[");
         if (resp && status == 200) {
             const char *p = resp;
             int first = 1;
@@ -1724,28 +1734,28 @@ static void api_tracking_diag(int fd, const char *query) {
                 char *name = malloc(len + 1);
                 memcpy(name, st, len); name[len] = '\0';
                 char *ee = json_escape_local(name);
-                o += snprintf(out + o, cap - o, "%s\"%s\"", first ? "" : ",", ee ? ee : "");
+                APPEND("%s\"%s\"", first ? "" : ",", ee ? ee : "");
                 free(ee); free(name);
                 first = 0;
                 p++;
             }
         }
-        o += snprintf(out + o, cap - o, "]");
+        APPEND("]");
         free(resp);
     }
 
     /* 5) проверка чтения вкладки месяца */
     char month[256];
     current_month_name(month, sizeof(month));
-    o += snprintf(out + o, cap - o, ",\"month_tab\":\"%s\"", month);
+    APPEND(",\"month_tab\":\"%s\"", month);
     if (g_sheet_id && tok) {
         TRows rows;
         memset(&rows, 0, sizeof(rows));
         char *resp = sheets_get_values(month);
-        o += snprintf(out + o, cap - o, ",\"read_ok\":%s", resp ? "true" : "false");
+        APPEND(",\"read_ok\":%s", resp ? "true" : "false");
         if (resp) {
             parse_values_json(resp, &rows);
-            o += snprintf(out + o, cap - o, ",\"rows\":%d", rows.count);
+            APPEND(",\"rows\":%d", rows.count);
             trows_free(&rows);
             free(resp);
         }
@@ -1762,7 +1772,7 @@ static void api_tracking_diag(int fd, const char *query) {
         else {
             /* вкладки нет — создаём */
             if (sheets_create_sheet(month) == 0) {
-                o += snprintf(out + o, cap - o, ",\"tab_created\":true");
+                APPEND(",\"tab_created\":true");
                 static const char *HEAD[6] = {
                     "Дата", "Время прихода", "Время ухода",
                     "Время в часах", "Ставка в час", "Сумма за день"
@@ -1780,8 +1790,8 @@ static void api_tracking_diag(int fd, const char *query) {
         current_datetime(date, sizeof(date), ts, sizeof(ts));
         const char *cells[6] = { date, ts, "", "", "500", "" };
         int rc = append_row(cells);
-        o += snprintf(out + o, cap - o, ",\"write_ok\":%s", rc == 0 ? "true" : "false");
-        o += snprintf(out + o, cap - o, ",\"write_test\":{\"date\":\"%s\",\"time\":\"%s\"}",
+        APPEND(",\"write_ok\":%s", rc == 0 ? "true" : "false");
+        APPEND(",\"write_test\":{\"date\":\"%s\",\"time\":\"%s\"}",
                       date, ts);
     }
     free(w);
@@ -1809,10 +1819,11 @@ static void api_tracking_diag(int fd, const char *query) {
 
     if (g_last_error[0]) {
         char *ee = json_escape_local(g_last_error);
-        o += snprintf(out + o, cap - o, ",\"last_error\":\"%s\"", ee ? ee : "");
+        APPEND(",\"last_error\":\"%s\"", ee ? ee : "");
         free(ee);
     }
-    o += snprintf(out + o, cap - o, "}");
+    APPEND("}");
+    #undef APPEND
     trk_reply(fd, "200 OK", out);
     free(out);
 }
