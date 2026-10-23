@@ -1818,6 +1818,7 @@ static void api_tracking_diag(int fd, const char *query) {
             while ((p = strstr(p, "\"title\"")) != NULL) {
                 p = strchr(p, ':');
                 if (!p) break;
+                p++;                       /* пропускаем двоеточие */
                 while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
                 if (*p != '"') break;
                 p++;                       /* пропускаем открывающую кавычку */
