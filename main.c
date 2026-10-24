@@ -987,6 +987,22 @@ static void tg_send_text(long long chat_id, const char *text) {
     run_curl(cmd);
 }
 
+/* Клавиатура учёта времени (Пришла / Ушла / Деньги) в JSON-виде. */
+#define TRACK_KEYBOARD_JSON "{\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"}],{\"text\":\"Деньги\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
+
+/* Отправляет текст вместе с клавиатурой — так клавиатура всегда остаётся
+   на экране, даже если пользователь её раньше скрыл. */
+static void tg_send_text_kb(long long chat_id, const char *text) {
+    char cmd[8192];
+    snprintf(cmd, sizeof(cmd),
+        "curl -sS --max-time 20 --data-urlencode 'chat_id=%lld' "
+        "--data-urlencode 'text=%s' "
+        "--data-urlencode 'reply_markup=" TRACK_KEYBOARD_JSON "' "
+        "https://api.telegram.org/bot%s/sendMessage",
+        chat_id, text, BOT_TOKEN);
+    run_curl(cmd);
+}
+
 static void tg_photo(long long chat_id, const char *title) {
     char *t = json_escape(title ? title : "");
     char cmd[8192];
@@ -1169,14 +1185,14 @@ static void tg_send_money_total(long long chat_id, const char *month) {
     if (days <= 0 && sum <= 0) {
         char msg[256];
         snprintf(msg, sizeof(msg), "%s: отметок нет.", label);
-        tg_send_text(chat_id, msg);
+        tg_send_text_kb(chat_id, msg);
         return;
     }
     char msg[512];
     snprintf(msg, sizeof(msg),
              "%s\nОтработано: %.2f ч. за %d дн.\nЗаработано: %.2f",
              label, hours, days, sum);
-    tg_send_text(chat_id, msg);
+    tg_send_text_kb(chat_id, msg);
 }
 
 /* Выполняет отметку и отправляет результат в чат. */
@@ -1211,7 +1227,8 @@ static void bot_track(long long chat_id, const char *action) {
     }
     if (r) jfree(r);
 
-    tg_send_text(chat_id, msg);
+    /* Ответ идёт вместе с клавиатурой: она всегда остаётся на экране */
+    tg_send_text_kb(chat_id, msg);
 }
 
 /* ================================================================
@@ -1232,7 +1249,12 @@ static void process_update(const char *body) {
             low[j] = '\0';
 
             /* Кнопки учёта времени (reply-клавиатура) */
-            if (strstr(text, "Пришла") || strcmp(low, "/in") == 0) {
+            if (strcmp(low, "/start") == 0 || strcmp(low, "/help") == 0 ||
+                strcmp(low, "/start@") == 0) {
+                /* /start и /help — принудительно обновляют клавиатуру */
+                tg_send_text_kb(cid, HELP_MSG);
+                tg_send_track_menu(cid);
+            } else if (strstr(text, "Пришла") || strcmp(low, "/in") == 0) {
                 bot_track(cid, "in");
             } else if (strstr(text, "Ушла") || strcmp(low, "/out") == 0) {
                 bot_track(cid, "out");
