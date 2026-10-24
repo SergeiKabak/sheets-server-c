@@ -1591,6 +1591,20 @@ static int handle_conn(int client_fd) {
         http_reply(client_fd, "200 OK", "OK");
         return 0;
     }
+    if (strcmp(path, "/version") == 0) {
+        /* Показывает, какой коммит реально задеплоен (Render прокидывает
+           RENDER_GIT_COMMIT / RENDER_GIT_BRANCH в окружение). */
+        const char *sha    = getenv("RENDER_GIT_COMMIT");
+        const char *branch = getenv("RENDER_GIT_BRANCH");
+        char json[512];
+        snprintf(json, sizeof(json),
+                 "{\"commit\":\"%s\",\"branch\":\"%s\","
+                 "\"track_buttons\":\"Пришла/Ушла\"}",
+                 sha    ? sha    : "unknown",
+                 branch ? branch : "unknown");
+        http_reply(client_fd, "200 OK", json);
+        return 0;
+    }
     if (strcmp(path, "/") == 0) {
         serve_miniapp(client_fd);
         return 0;
