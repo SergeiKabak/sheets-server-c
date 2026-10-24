@@ -1381,7 +1381,7 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
         }
         double rate = employee_rate_by_name(name);
         char rate_buf[32];
-        snprintf(rate_buf, sizeof(rate_buf), "%.0f", rate);
+        snprintf(rate_buf, sizeof(rate_buf), "%.2f", rate);
 
         if (date_row >= 0) {
             /* строка за сегодня уже есть, но время прихода пустое */
@@ -1462,7 +1462,7 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
         rows.row[date_row].cell[5] = strdup(sum_buf);
         if (cell_empty(rows.row[date_row].cell[4])) {
             char rb[32];
-            snprintf(rb, sizeof(rb), "%.0f", rate);
+            snprintf(rb, sizeof(rb), "%.2f", rate);
             free(rows.row[date_row].cell[4]);
             rows.row[date_row].cell[4] = strdup(rb);
         }
