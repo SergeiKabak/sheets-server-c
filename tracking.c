@@ -1341,22 +1341,22 @@ static char *resolve_employee(const char *init_data) {
 }
 /* POST /api/tracking/clock?action=in|out
    Тело: initData=... (application/x-www-form-urlencoded) */
-static void api_tracking_clock(int fd, const char *query, const char *body) {
-    char *action = query_param(query, "action");
-    (void)body;
-    if (!action) {
-        trk_reply(fd, "400 Bad Request", "{\"ok\":false,\"error\":\"no action\"}");
-        goto done;
+/* Выполняет отметку прихода/ухода. Возвращает HTTP-код (200/400/409/500),
+   в out пишет JSON-ответ. Используется и HTTP-API, и Telegram-ботом. */
+int tracking_do_clock(const char *action, char *out, size_t cap) {
+    if (!action || !*action) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"no action\"}");
+        return 400;
     }
 
     const char *sn = getenv("SEARCH_NAME");
     char *name = sn && *sn ? strdup(sn) : strdup("Сотрудник");
     if (!name) {
-        trk_reply(fd, "500 Internal Server Error", "{\"ok\":false,\"error\":\"no name\"}");
-        goto done;
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"no name\"}");
+        return 500;
     }
 
-    /* Время с округлением в меньшую сторону до целых минут (секунды отбрасываются) */
+    /* Время с округлением в меньшую сторону до целых минут */
     time_t now_raw = time(NULL) + g_tz_offset;
     struct tm tm;
     gmtime_r(&now_raw, &tm);
@@ -1370,34 +1370,30 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
     TRows rows;
     memset(&rows, 0, sizeof(rows));
     if (load_or_create_month_sheet(g_current_sheet, &rows) != 0) {
-        trk_reply(fd, "500 Internal Server Error",
-                  "{\"ok\":false,\"error\":\"cannot access sheet\"}");
         trows_free(&rows);
         free(name);
-        goto done;
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"cannot access sheet\"}");
+        return 500;
     }
 
     int block = find_employee_block(&rows, name);
     int date_row = (block >= 0) ? find_date_row(&rows, block, date) : -1;
+    int code = 200;
 
     if (strcmp(action, "in") == 0) {
         if (date_row >= 0 && !cell_empty(rows.row[date_row].cell[1])) {
-            char msg[512];
             char *e = json_escape_local("Уже отмечен приход сегодня");
-            snprintf(msg, sizeof(msg),
-                "{\"ok\":false,\"error\":\"%s\",\"time\":\"%s\"}", e ? e : "", time_s);
-            trk_reply(fd, "409 Conflict", msg);
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\",\"time\":\"%s\"}",
+                     e ? e : "", time_s);
             free(e);
-            trows_free(&rows);
-            free(name);
-            goto done;
+            code = 409;
+            goto finish;
         }
         double rate = employee_rate_by_name(name);
         char rate_buf[32];
         snprintf(rate_buf, sizeof(rate_buf), "%.2f", rate);
 
         if (date_row >= 0) {
-            /* строка за сегодня уже есть, но время прихода пустое */
             free(rows.row[date_row].cell[1]);
             rows.row[date_row].cell[1] = strdup(time_s);
             if (cell_empty(rows.row[date_row].cell[4])) {
@@ -1405,7 +1401,6 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
                 rows.row[date_row].cell[4] = strdup(rate_buf);
             }
         } else if (block >= 0) {
-            /* блок сотрудника есть — новая строка в конец его блока */
             int last = find_block_end(&rows, block);
             trows_insert(&rows, last + 1);
             int ni = last + 1;
@@ -1413,7 +1408,6 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
             free(rows.row[ni].cell[1]); rows.row[ni].cell[1] = strdup(time_s);
             free(rows.row[ni].cell[4]); rows.row[ni].cell[4] = strdup(rate_buf);
         } else {
-            /* новый сотрудник — блок: пустая строка + ФИО + строка дня */
             trows_insert(&rows, rows.count);
             trows_insert(&rows, rows.count);
             int ni = rows.count - 1;
@@ -1426,34 +1420,28 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
         }
 
         if (sheets_write_rows(g_current_sheet, &rows) != 0) {
-            trk_reply(fd, "500 Internal Server Error",
-                      "{\"ok\":false,\"error\":\"write failed\"}");
-            trows_free(&rows); free(name);
-            goto done;
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"write failed\"}");
+            code = 500;
+            goto finish;
         }
-        char msg[512];
         char *en = json_escape_local(name);
-        snprintf(msg, sizeof(msg),
+        snprintf(out, cap,
             "{\"ok\":true,\"action\":\"in\",\"name\":\"%s\",\"date\":\"%s\",\"time\":\"%s\"}",
             en ? en : "", date, time_s);
-        trk_reply(fd, "200 OK", msg);
         free(en);
         trk_log("CLOCK IN: %s date=%s time=%s", name, date, time_s);
 
     } else if (strcmp(action, "out") == 0) {
         if (date_row < 0 || cell_empty(rows.row[date_row].cell[1])) {
-            trk_reply(fd, "409 Conflict",
-                      "{\"ok\":false,\"error\":\"no clock-in for today\"}");
-            trows_free(&rows); free(name);
-            goto done;
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"no clock-in for today\"}");
+            code = 409;
+            goto finish;
         }
         if (!cell_empty(rows.row[date_row].cell[2])) {
-            trk_reply(fd, "409 Conflict",
-                      "{\"ok\":false,\"error\":\"already clocked out\"}");
-            trows_free(&rows); free(name);
-            goto done;
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"already clocked out\"}");
+            code = 409;
+            goto finish;
         }
-        /* заполняем время ухода и формулы */
         free(rows.row[date_row].cell[2]);
         rows.row[date_row].cell[2] = strdup(time_s);
 
@@ -1466,7 +1454,7 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
         }
         char hours_buf[32], sum_buf[32];
         snprintf(hours_buf, sizeof(hours_buf), "%.2f", hours);
-        double rate = atof(rows.row[date_row].cell[4]);
+        double rate = atof_comm(rows.row[date_row].cell[4]);
         snprintf(sum_buf, sizeof(sum_buf), "%.2f", hours * rate);
 
         free(rows.row[date_row].cell[3]);
@@ -1481,30 +1469,41 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
         }
 
         if (sheets_write_rows(g_current_sheet, &rows) != 0) {
-            trk_reply(fd, "500 Internal Server Error",
-                      "{\"ok\":false,\"error\":\"write failed\"}");
-            trows_free(&rows); free(name);
-            goto done;
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"write failed\"}");
+            code = 500;
+            goto finish;
         }
-        char msg[512];
         char *en = json_escape_local(name);
-        snprintf(msg, sizeof(msg),
-            "{\"ok\":true,\"action\":\"out\",\"name\":\"%s\",\"date\":\"%s\",\"time\":\"%s\","
-            "\"hours\":\"%s\",\"sum\":\"%s\"}",
+        snprintf(out, cap,
+            "{\"ok\":true,\"action\":\"out\",\"name\":\"%s\",\"date\":\"%s\","
+            "\"time\":\"%s\",\"hours\":\"%s\",\"sum\":\"%s\"}",
             en ? en : "", date, time_s, hours_buf, sum_buf);
-        trk_reply(fd, "200 OK", msg);
         free(en);
         trk_log("CLOCK OUT: %s date=%s time=%s hours=%s sum=%s",
                 name, date, time_s, hours_buf, sum_buf);
 
     } else {
-        trk_reply(fd, "400 Bad Request", "{\"ok\":false,\"error\":\"bad action\"}");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"bad action\"}");
+        code = 400;
     }
 
+finish:
     trows_free(&rows);
     free(name);
+    return code;
+}
 
-done:
+/* HTTP-обёртка над tracking_do_clock */
+static void api_tracking_clock(int fd, const char *query, const char *body) {
+    (void)body;
+    char *action = query_param(query, "action");
+    char out[1024];
+    int code = tracking_do_clock(action, out, sizeof(out));
+    const char *status = (code == 200) ? "200 OK"
+                       : (code == 409) ? "409 Conflict"
+                       : (code == 400) ? "400 Bad Request"
+                       : "500 Internal Server Error";
+    trk_reply(fd, status, out);
     free(action);
 }
 

@@ -1057,7 +1057,73 @@ static void show_index(long long cid, int idx, MonthEntry *mo, int count) {
 
 static const char HELP_MSG[] =
     "Привет! Я бот-график смен.\n\n"
-    "Открывай график через кнопку меню чата 📅";
+    "📅 График — кнопка меню чата\n"
+    "⏱ Отметить время — кнопки внизу";
+
+/* ------------------------------------------------------------------
+ *  Кнопки учёта времени прямо в чате бота
+ * ------------------------------------------------------------------ */
+
+/* Отправляет сообщение с кнопками «Пришла»/«Ушла» (reply-клавиатура). */
+static void tg_send_track_menu(long long chat_id) {
+    char cmd[8192];
+    snprintf(cmd, sizeof(cmd),
+        "curl -sS --max-time 20 "
+        "--data-urlencode 'chat_id=%lld' "
+        "--data-urlencode 'text=%s' "
+        "--data-urlencode 'reply_markup={\"keyboard\":[[{\"text\":\"✅ Пришла\"},{\"text\":\"🚪 Ушла\"}]],\"resize_keyboard\":true,\"is_persistent\":true}' "
+        "https://api.telegram.org/bot%s/sendMessage",
+        chat_id, "Отметьте рабочее время:", BOT_TOKEN);
+    run_curl(cmd);
+}
+
+/* Отправляет сообщение с inline-кнопками (под сообщением). */
+static void tg_send_track_inline(long long chat_id) {
+    char cmd[8192];
+    snprintf(cmd, sizeof(cmd),
+        "curl -sS --max-time 20 "
+        "--data-urlencode 'chat_id=%lld' "
+        "--data-urlencode 'text=%s' "
+        "--data-urlencode 'reply_markup={\"inline_keyboard\":[[{\"text\":\"✅ Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"🚪 Ушла\",\"callback_data\":\"trk_out\"}]]}' "
+        "https://api.telegram.org/bot%s/sendMessage",
+        chat_id, "Отметьте рабочее время:", BOT_TOKEN);
+    run_curl(cmd);
+}
+
+/* Выполняет отметку и отправляет результат в чат. */
+static void bot_track(long long chat_id, const char *action) {
+    char json[1024];
+    int code = tracking_do_clock(action, json, sizeof(json));
+
+    JNode *r = jparse(json);
+    const char *err = r ? jstr(jfind(r, "error")) : NULL;
+    char msg[768];
+
+    if (code == 200) {
+        const char *t = r ? jstr(jfind(r, "time")) : NULL;
+        if (strcmp(action, "in") == 0) {
+            snprintf(msg, sizeof(msg), "✅ Записано! Приход в %s", t ? t : "");
+        } else {
+            const char *h = r ? jstr(jfind(r, "hours")) : NULL;
+            const char *s = r ? jstr(jfind(r, "sum")) : NULL;
+            snprintf(msg, sizeof(msg), "✅ Записано! Уход в %s", t ? t : "");
+            if (h && *h) {
+                size_t l = strlen(msg);
+                snprintf(msg + l, sizeof(msg) - l, "\nОтработано: %s ч.", h);
+            }
+            if (s && *s) {
+                size_t l = strlen(msg);
+                snprintf(msg + l, sizeof(msg) - l, "\nСумма: %s", s);
+            }
+        }
+    } else {
+        snprintf(msg, sizeof(msg), "⚠️ %s",
+                 (err && *err) ? err : "Не удалось записать");
+    }
+    if (r) jfree(r);
+
+    tg_send_text(chat_id, msg);
+}
 
 /* ================================================================
  * Обработка Telegram-update
@@ -1076,7 +1142,19 @@ static void process_update(const char *body) {
             for (int i = 0; text[i] && j < 1022; i++) low[j++] = (char)tolower((unsigned char)text[i]);
             low[j] = '\0';
 
-            tg_send_text(cid, HELP_MSG);
+            /* Кнопки учёта времени (reply-клавиатура) */
+            if (strstr(text, "Пришла") || strcmp(low, "/in") == 0) {
+                bot_track(cid, "in");
+            } else if (strstr(text, "Ушла") || strcmp(low, "/out") == 0) {
+                bot_track(cid, "out");
+            } else if (strstr(low, "/track") || strstr(low, "/time") ||
+                       strstr(text, "Отметить") || strstr(text, "время")) {
+                tg_send_track_inline(cid);
+                tg_send_track_menu(cid);
+            } else {
+                tg_send_text(cid, HELP_MSG);
+                tg_send_track_menu(cid);
+            }
         }
         jfree(root);
         return;
@@ -1096,6 +1174,19 @@ static void process_update(const char *body) {
         if (idx < 0) idx = pick_current_index(mo, count);
 
         if (data) {
+            /* Кнопки учёта времени */
+            if (strcmp(data, "trk_in") == 0) {
+                bot_track(cid, "in");
+                if (cqid) tg_answer(cqid, "Записано");
+                jfree(root);
+                return;
+            }
+            if (strcmp(data, "trk_out") == 0) {
+                bot_track(cid, "out");
+                if (cqid) tg_answer(cqid, "Записано");
+                jfree(root);
+                return;
+            }
             if (strcmp(data, "prev") == 0) { if (idx > 0) idx--; }
             else if (strcmp(data, "next") == 0) { if (idx < count - 1) idx++; }
         }
