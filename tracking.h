@@ -8,14 +8,18 @@
  * Переменные окружения:
  *   TRACKING_SHEET_ID   — ID таблицы Time tracking
  *   GOOGLE_SERVICE_ACCOUNT_JSON — JSON-ключ сервисного аккаунта
- *   EMPLOYEE_MAP        — {"chat_id":{"name":"ФИО","rate":"500"}, ...}
- *   HOURLY_RATE         — ставка по умолчанию (если нет в EMPLOYEE_MAP)
+ *   HOURLY_RATE         — ставка в час
  */
 
 #ifndef TRACKING_H
 #define TRACKING_H
 
 #include <stddef.h>
+
+/* Инициализирует конфигурацию из переменных окружения (ключ сервисного
+   аккаунта, ID таблицы, ставку). Вызывается и из HTTP-обработчика,
+   и напрямую из Telegram-бота. */
+void tracking_ensure_init(void);
 
 /* Обрабатывает запросы /api/tracking/...
  * method — HTTP-метод, path — путь с query-строкой, body — тело запроса (может быть NULL) */

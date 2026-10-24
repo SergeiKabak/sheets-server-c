@@ -46,8 +46,6 @@ static double atof_comm(const char *s) {
 
 static char *g_sa_json = NULL;
 static char *g_sheet_id = NULL;
-static char *g_emp_map = NULL;
-static char *g_rates_map = NULL;
 static double g_default_rate = 0.0;
 static int g_tz_offset = 3 * 3600;   /* локальное время = UTC + 3ч */
 
@@ -579,48 +577,19 @@ static char *query_param(const char *query, const char *name) {
     return dec;
 }
 
-/* Поиск сотрудника в EMPLOYEE_MAP: {"chat_id":"Имя Фамилия", ...} */
+/* Единственный сотрудник. Сопоставление chat_id -> ФИО не требуется:
+   отметки прихода/ухода делает один и тот же человек. */
 static char *employee_name_by_chat(const char *chat_id) {
-    if (!g_emp_map || !chat_id) return NULL;
-    char pat[128];
-    snprintf(pat, sizeof(pat), "\"%s\"", chat_id);
-    const char *p = strstr(g_emp_map, pat);
-    if (!p) return NULL;
-    p += strlen(pat);
-    while (*p && *p != ':') p++;
-    if (!*p) return NULL;
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (*p != '"') return NULL;
-    p++;
-    const char *e = p;
-    while (*e && *e != '"') {
-        if (*e == '\\' && e[1]) e++;
-        e++;
-    }
-    size_t len = (size_t)(e - p);
-    char *name = malloc(len + 1);
-    if (!name) return NULL;
-    memcpy(name, p, len);
-    name[len] = '\0';
-    return name;
+    (void)chat_id;
+    const char *sn = getenv("SEARCH_NAME");
+    if (sn && *sn) return strdup(sn);
+    return strdup("Бинкевич Татьяна Эдуардовна");
 }
 
-/* Ставка для сотрудника: EMPLOYEE_MAP_RATES = {"Имя Фамилия":"500"} */
+/* Ставка в час: из HOURLY_RATE (env), иначе 500. */
 static double employee_rate_by_name(const char *name) {
-    if (!g_rates_map || !name) return g_default_rate;
-    char pat[320];
-    snprintf(pat, sizeof(pat), "\"%s\"", name);
-    const char *p = strstr(g_rates_map, pat);
-    if (!p) return g_default_rate;
-    p += strlen(pat);
-    while (*p && *p != ':') p++;
-    if (!*p) return g_default_rate;
-    p++;
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p == '"') p++;
-    double r = atof_comm(p);
-    return r > 0 ? r : g_default_rate;
+    (void)name;
+    return g_default_rate;
 }
 
 /* Проверяет, содержит ли ответ Google ошибку "API не включён" и заполняет
@@ -1328,7 +1297,7 @@ static void trk_reply(int fd, const char *status, const char *body) {
     write(fd, body, strlen(body));
 }
 
-/* Определяет сотрудника по initData: сперва EMPLOYEE_MAP, затем имя из Telegram */
+/* Определяет сотрудника: используется SEARCH_NAME (сотрудник один) */
 static char *resolve_employee(const char *init_data) {
     (void)init_data;
     const char *sn = getenv("SEARCH_NAME");
@@ -1344,6 +1313,20 @@ static char *resolve_employee(const char *init_data) {
 /* Выполняет отметку прихода/ухода. Возвращает HTTP-код (200/400/409/500),
    в out пишет JSON-ответ. Используется и HTTP-API, и Telegram-ботом. */
 int tracking_do_clock(const char *action, char *out, size_t cap) {
+    /* Бот вызывает эту функцию напрямую (без HTTP), поэтому конфигурацию
+       нужно подготовить здесь же — иначе не будет ключа сервисного аккаунта
+       и ID таблицы ("cannot access sheet"). */
+    tracking_ensure_init();
+    if (!g_sheet_id) {
+        if (tracking_ensure_spreadsheet() != 0) {
+            char *e = json_escape_local(g_last_error[0] ? g_last_error
+                                        : "cannot access sheet");
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "cannot access sheet");
+            free(e);
+            return 500;
+        }
+    }
+
     if (!action || !*action) {
         snprintf(out, cap, "{\"ok\":false,\"error\":\"no action\"}");
         return 400;
@@ -1372,7 +1355,10 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
     if (load_or_create_month_sheet(g_current_sheet, &rows) != 0) {
         trows_free(&rows);
         free(name);
-        snprintf(out, cap, "{\"ok\":false,\"error\":\"cannot access sheet\"}");
+        char *e = json_escape_local(g_last_error[0] ? g_last_error
+                                    : "cannot access sheet");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "cannot access sheet");
+        free(e);
         return 500;
     }
 
@@ -1572,28 +1558,33 @@ static void api_tracking_summary(int fd, const char *query) {
     free(name); free(month);
 }
 
+/* Инициализация конфигурации из переменных окружения.
+   ВАЖНО: вызывается и из HTTP-обработчика (/api/tracking/...), и напрямую
+   из Telegram-бота (tracking_do_clock). Раньше инициализация жила только
+   внутри tracking_handle(), из-за чего бот работал без ключа сервисного
+   аккаунта и без ID таблицы ("cannot access sheet"), а Mini App — работал. */
+void tracking_ensure_init(void) {
+    if (g_inited) return;
+    g_inited = 1;
+    g_sa_json = getenv("GOOGLE_SERVICE_ACCOUNT_JSON");
+    const char *r = getenv("HOURLY_RATE");
+    if (r && *r) g_default_rate = atof_comm(r);
+    else { g_default_rate = 500.0; trk_log("HOURLY_RATE not set, using default 500"); }
+    const char *tz = getenv("TZ_OFFSET_SECONDS");
+    if (tz) g_tz_offset = atoi(tz);
+    const char *base = getenv("GOOGLE_API_BASE");
+    g_api_base = (base && *base) ? (char *)base : (char *)"https://sheets.googleapis.com";
+    const char *dbase = getenv("GOOGLE_DRIVE_BASE");
+    g_drive_base = (dbase && *dbase) ? (char *)dbase : (char *)"https://www.googleapis.com";
+    trk_log("init: sheet=%s sa=%s rate=%.0f tz=%d",
+            g_sheet_id ? g_sheet_id : "(null)",
+            g_sa_json ? "yes" : "no",
+            g_default_rate, g_tz_offset);
+}
+
 /* Точка входа */
 void tracking_handle(int fd, const char *method, const char *path, const char *body) {
-    if (!g_inited) {
-        g_inited = 1;
-        g_sa_json     = getenv("GOOGLE_SERVICE_ACCOUNT_JSON");
-        g_emp_map     = getenv("EMPLOYEE_MAP");
-        g_rates_map   = getenv("EMPLOYEE_RATES");
-        const char *r = getenv("HOURLY_RATE");
-        if (r && *r) g_default_rate = atof_comm(r);
-        else { g_default_rate = 500.0; trk_log("HOURLY_RATE not set, using default 500"); }
-        const char *tz = getenv("TZ_OFFSET_SECONDS");
-        if (tz) g_tz_offset = atoi(tz);
-        const char *base = getenv("GOOGLE_API_BASE");
-        g_api_base = (base && *base) ? (char *)base : (char *)"https://sheets.googleapis.com";
-        const char *dbase = getenv("GOOGLE_DRIVE_BASE");
-        g_drive_base = (dbase && *dbase) ? (char *)dbase : (char *)"https://www.googleapis.com";
-        trk_log("init: sheet=%s sa=%s emp_map=%s rate=%.0f tz=%d",
-                g_sheet_id ? g_sheet_id : "(null)",
-                g_sa_json ? "yes" : "no",
-                g_emp_map ? "yes" : "no",
-                g_default_rate, g_tz_offset);
-    }
+    tracking_ensure_init();
 
     /* Первый вызов: находим существующую таблицу или создаём новую
        (владельцем будет Service Account). */
@@ -1814,10 +1805,10 @@ static void api_tracking_diag(int fd, const char *query) {
     APPEND(",\"share_email\":\"%s\"",
                   getenv("TRACKING_SHARE_EMAIL") ? getenv("TRACKING_SHARE_EMAIL") : "");
     APPEND(",\"emp_map\":\"%s\"",
-                  getenv("EMPLOYEE_MAP") ? "set" : "MISSING");
+                  "n/a");
     APPEND(",\"rate\":\"%.0f\"", g_default_rate);
     APPEND(",\"rates_map\":\"%s\"",
-                  getenv("EMPLOYEE_RATES") ? "set" : "MISSING");
+                  "n/a");
     APPEND(",\"tz_offset\":\"%d\"", g_tz_offset);
 
     /* 4) список вкладок */
@@ -1923,7 +1914,7 @@ static void api_tracking_diag(int fd, const char *query) {
             "(1zhWZRFI6GYYnh6PNQn37KiSyPLvjkSwJz-CKwF0xEnw).\"");
     } else if (!g_default_rate) {
         APPEND(",\"hint\":\"HOURLY_RATE is 0 - set it (e.g. 500) so the "
-               "payment column is calculated. Also set EMPLOYEE_MAP with your "
+               "payment column is calculated."
                "Telegram chat id to map you to the full name in the sheet.\"");
     } else if (!g_sheet_id[0]) {
         o += snprintf(out + o, cap - o,
