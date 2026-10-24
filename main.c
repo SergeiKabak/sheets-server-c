@@ -1071,7 +1071,7 @@ static void tg_send_track_menu(long long chat_id) {
         "curl -sS --max-time 20 "
         "--data-urlencode 'chat_id=%lld' "
         "--data-urlencode 'text=%s' "
-        "--data-urlencode 'reply_markup={\"keyboard\":[[{\"text\":\"✅ Пришла\"},{\"text\":\"🚪 Ушла\"}]],\"resize_keyboard\":true,\"is_persistent\":true}' "
+        "--data-urlencode 'reply_markup={\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"}]],\"resize_keyboard\":true,\"is_persistent\":true}' "
         "https://api.telegram.org/bot%s/sendMessage",
         chat_id, "Отметьте рабочее время:", BOT_TOKEN);
     run_curl(cmd);
@@ -1084,7 +1084,7 @@ static void tg_send_track_inline(long long chat_id) {
         "curl -sS --max-time 20 "
         "--data-urlencode 'chat_id=%lld' "
         "--data-urlencode 'text=%s' "
-        "--data-urlencode 'reply_markup={\"inline_keyboard\":[[{\"text\":\"✅ Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"🚪 Ушла\",\"callback_data\":\"trk_out\"}]]}' "
+        "--data-urlencode 'reply_markup={\"inline_keyboard\":[[{\"text\":\"Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"Ушла\",\"callback_data\":\"trk_out\"}]]}' "
         "https://api.telegram.org/bot%s/sendMessage",
         chat_id, "Отметьте рабочее время:", BOT_TOKEN);
     run_curl(cmd);
