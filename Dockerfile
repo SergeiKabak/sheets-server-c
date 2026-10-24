@@ -5,7 +5,7 @@ WORKDIR /build
 
 COPY . .
 
-RUN gcc -O2 -Wall -Wextra -o server_app main.c tracking.c
+RUN gcc -O2 -Wall -Wextra -o server_app main.c tracking.c cJSON.c
 
 # --- ЭТАП 2: Финальный запуск ---
 FROM debian:bookworm-slim

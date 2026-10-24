@@ -10,7 +10,7 @@ CFLAGS_NATIVE = -O2 -Wall -Wextra
 
 TARGET_ARM = sheet
 TARGET_NATIVE = server_app
-SRC = main.c tracking.c
+SRC = main.c tracking.c cJSON.c
 
 .PHONY: all build run clean
 
