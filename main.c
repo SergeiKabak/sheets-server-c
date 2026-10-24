@@ -995,21 +995,35 @@ static void tg_photo(long long chat_id, const char *title) {
         "-F 'chat_id=%lld' "
         "-F 'photo=@%s' "
         "-F 'reply_markup={\"inline_keyboard\":[["
-        "{\"text\":\"◀ Назад\",\"callback_data\":\"prev\"},"
+        "{\"text\":\"Назад\",\"callback_data\":\"prev\"},"
         "{\"text\":\"%s\",\"callback_data\":\"noop\"},"
-        "{\"text\":\"Вперёд ▶\",\"callback_data\":\"next\"}]]}' "
+        "{\"text\":\"Вперёд\",\"callback_data\":\"next\"}]]}' "
         "https://api.telegram.org/bot%s/sendPhoto",
         chat_id, PNG_FILE, t, BOT_TOKEN);
     free(t);
     run_curl(cmd);
 }
 
-static void tg_answer(long long cq_id, const char *text) {
+/* Подтверждает нажатие на inline-кнопку.
+   id в Telegram — строка (например "4382bfdwdsb323b2d9"), поэтому принимаем const char*.
+   text передаётся как POST-параметр с --data-urlencode (корректный URL-кодинг). */
+static void tg_answer(const char *cq_id, const char *text) {
+    if (!cq_id || !*cq_id) return;
     char cmd[4096];
-    snprintf(cmd, sizeof(cmd),
-        "curl -sS --max-time 20 "
-        "'https://api.telegram.org/bot%s/answerCallbackQuery?callback_query_id=%lld%s'",
-        BOT_TOKEN, cq_id, text ? text : "");
+    if (text && *text) {
+        snprintf(cmd, sizeof(cmd),
+            "curl -sS --max-time 20 -X POST "
+            "--data-urlencode 'callback_query_id=%s' "
+            "--data-urlencode 'text=%s' "
+            "https://api.telegram.org/bot%s/answerCallbackQuery",
+            cq_id, text, BOT_TOKEN);
+    } else {
+        snprintf(cmd, sizeof(cmd),
+            "curl -sS --max-time 20 -X POST "
+            "--data-urlencode 'callback_query_id=%s' "
+            "https://api.telegram.org/bot%s/answerCallbackQuery",
+            cq_id, BOT_TOKEN);
+    }
     run_curl(cmd);
 }
 
@@ -1057,8 +1071,8 @@ static void show_index(long long cid, int idx, MonthEntry *mo, int count) {
 
 static const char HELP_MSG[] =
     "Привет! Я бот-график смен.\n\n"
-    "📅 График — кнопка меню чата\n"
-    "⏱ Отметить время — кнопки внизу";
+    "График — кнопка меню чата\n"
+    "Отметить время — кнопки внизу";
 
 /* ------------------------------------------------------------------
  *  Кнопки учёта времени прямо в чате бота
@@ -1102,11 +1116,11 @@ static void bot_track(long long chat_id, const char *action) {
     if (code == 200) {
         const char *t = r ? jstr(jfind(r, "time")) : NULL;
         if (strcmp(action, "in") == 0) {
-            snprintf(msg, sizeof(msg), "✅ Записано! Приход в %s", t ? t : "");
+            snprintf(msg, sizeof(msg), "Записано! Приход в %s", t ? t : "");
         } else {
             const char *h = r ? jstr(jfind(r, "hours")) : NULL;
             const char *s = r ? jstr(jfind(r, "sum")) : NULL;
-            snprintf(msg, sizeof(msg), "✅ Записано! Уход в %s", t ? t : "");
+            snprintf(msg, sizeof(msg), "Записано! Уход в %s", t ? t : "");
             if (h && *h) {
                 size_t l = strlen(msg);
                 snprintf(msg + l, sizeof(msg) - l, "\nОтработано: %s ч.", h);
@@ -1117,7 +1131,7 @@ static void bot_track(long long chat_id, const char *action) {
             }
         }
     } else {
-        snprintf(msg, sizeof(msg), "⚠️ %s",
+        snprintf(msg, sizeof(msg), "Ошибка: %s",
                  (err && *err) ? err : "Не удалось записать");
     }
     if (r) jfree(r);
@@ -1161,7 +1175,8 @@ static void process_update(const char *body) {
     }
 
     if (jfind(root, "callback_query")) {
-        long long cqid = jll(jfind(root, "callback_query.id"));
+        /* id в callback_query — строка, не число: читаем через jstr() */
+        const char *cqid = jstr(jfind(root, "callback_query.id"));
         long long cid  = jll(jfind(root, "callback_query.message.chat.id"));
         const char *data = jstr(jfind(root, "callback_query.data"));
 
@@ -1320,7 +1335,7 @@ static void serve_miniapp(int fd) {
         "};"
         "xhr.send();"
         "}"
-        "function trkMsg(txt,ok){var el=document.getElementById('trk-st');if(el){el.textContent=(ok?'✅ ':'⚠️ ')+txt;el.className=ok?'trk-banner ok':'trk-banner err';el.style.display='block';}}"
+        "function trkMsg(txt,ok){var el=document.getElementById('trk-st');if(el){el.textContent=txt;el.className=ok?'trk-banner ok':'trk-banner err';el.style.display='block';}}"
         "function tgAlert(m){var tg=window.Telegram&&window.Telegram.WebApp;if(tg&&tg.showAlert){try{tg.showAlert(m);}catch(e){}}}"
         "function trkPost(action,cb){"
         "var xhr=new XMLHttpRequest();"
@@ -1544,7 +1559,7 @@ static void set_chat_menu_button(void) {
     snprintf(cmd, sizeof(cmd),
         "curl -sS --max-time 20 -X POST "
         "-H 'Content-Type: application/json' "
-        "-d '{\"menu_button\":{\"type\":\"web_app\",\"text\":\"\\uD83C\\uDFD5 График\",\"web_app\":{\"url\":\"%s\"}}}' "
+        "-d '{\"menu_button\":{\"type\":\"web_app\",\"text\":\"График\",\"web_app\":{\"url\":\"%s\"}}}' "
         "https://api.telegram.org/bot%s/setChatMenuButton",
         eu, BOT_TOKEN);
     run_curl(cmd);
@@ -1593,15 +1608,20 @@ static int handle_conn(int client_fd) {
     }
     if (strcmp(path, "/version") == 0) {
         /* Показывает, какой коммит реально задеплоен (Render прокидывает
-           RENDER_GIT_COMMIT / RENDER_GIT_BRANCH в окружение). */
+           RENDER_GIT_COMMIT / RENDER_GIT_BRANCH в окружение).
+           miniapp_url: задан ли MINIAPP_URL — без него не будет кнопки меню
+           чата, то есть не будет доступа к графику-таблице из Telegram. */
         const char *sha    = getenv("RENDER_GIT_COMMIT");
         const char *branch = getenv("RENDER_GIT_BRANCH");
         char json[512];
         snprintf(json, sizeof(json),
                  "{\"commit\":\"%s\",\"branch\":\"%s\","
-                 "\"track_buttons\":\"Пришла/Ушла\"}",
+                 "\"track_buttons\":\"Пришла/Ушла\","
+                 "\"miniapp_url\":\"%s\",\"menu_button\":\"%s\"}",
                  sha    ? sha    : "unknown",
-                 branch ? branch : "unknown");
+                 branch ? branch : "unknown",
+                 (MINIAPP_URL && *MINIAPP_URL) ? "set" : "missing",
+                 (MINIAPP_URL && *MINIAPP_URL) ? "web_app График" : "none");
         http_reply(client_fd, "200 OK", json);
         return 0;
     }
@@ -1693,6 +1713,9 @@ static void background_updater(void) {
         if (idx) { fclose(idx); fprintf(stderr, "[cabinet] index saved\n"); }
         save_months(mo, c);
         fprintf(stderr, "[updater] months cached: %d\n", c);
+        /* Кнопка меню чата (доступ к графику-таблице) ставится периодически:
+           если при старте запрос не прошёл, доступ к таблице восстановится. */
+        set_chat_menu_button();
         sleep(CACHE_TTL);
     }
 }
