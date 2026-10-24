@@ -1072,7 +1072,8 @@ static void show_index(long long cid, int idx, MonthEntry *mo, int count) {
 static const char HELP_MSG[] =
     "Привет! Я бот-график смен.\n\n"
     "График — кнопка меню чата\n"
-    "Отметить время — кнопки внизу";
+    "Отметить время — кнопки внизу\n"
+    "Деньги — заработок по месяцам";
 
 /* ------------------------------------------------------------------
  *  Кнопки учёта времени прямо в чате бота
@@ -1085,7 +1086,7 @@ static void tg_send_track_menu(long long chat_id) {
         "curl -sS --max-time 20 "
         "--data-urlencode 'chat_id=%lld' "
         "--data-urlencode 'text=%s' "
-        "--data-urlencode 'reply_markup={\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"}]],\"resize_keyboard\":true,\"is_persistent\":true}' "
+        "--data-urlencode 'reply_markup={\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"}],{\"text\":\"Деньги\"}]],\"resize_keyboard\":true,\"is_persistent\":true}' "
         "https://api.telegram.org/bot%s/sendMessage",
         chat_id, "Отметьте рабочее время:", BOT_TOKEN);
     run_curl(cmd);
@@ -1098,10 +1099,84 @@ static void tg_send_track_inline(long long chat_id) {
         "curl -sS --max-time 20 "
         "--data-urlencode 'chat_id=%lld' "
         "--data-urlencode 'text=%s' "
-        "--data-urlencode 'reply_markup={\"inline_keyboard\":[[{\"text\":\"Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"Ушла\",\"callback_data\":\"trk_out\"}]]}' "
+        "--data-urlencode 'reply_markup={\"inline_keyboard\":[[{\"text\":\"Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"Ушла\",\"callback_data\":\"trk_out\"}],{\"text\":\"Деньги\",\"callback_data\":\"trk_money\"}]]}' "
         "https://api.telegram.org/bot%s/sendMessage",
         chat_id, "Отметьте рабочее время:", BOT_TOKEN);
     run_curl(cmd);
+}
+
+/* Показывает кнопки с месяцами: по нажатию — сумма заработка за месяц. */
+static void tg_send_money_menu(long long chat_id) {
+    char **months = NULL;
+    int count = 0;
+    if (tracking_list_months(&months, &count, 24) != 0 || count == 0) {
+        if (months) {
+            for (int i = 0; i < count; i++) free(months[i]);
+            free(months);
+        }
+        tg_send_text(chat_id, "Не удалось получить список месяцев. Проверьте доступ к таблице.");
+        return;
+    }
+
+    /* Собираем inline-клавиатуру: по 3 месяца в ряд */
+    char kb[4096];
+    size_t o = 0;
+    int in_row = 0;
+    o += (size_t)snprintf(kb + o, sizeof(kb) - o, "{\"inline_keyboard\":[[");
+    for (int i = 0; i < count && o < sizeof(kb) - 256; i++) {
+        char label[64];
+        tracking_month_label(months[i], label, sizeof(label));
+        char *el = json_escape(label);
+        char *cd = json_escape(months[i]);
+        o += (size_t)snprintf(kb + o, sizeof(kb) - o,
+                              "%s{\"text\":\"%s\",\"callback_data\":\"mon:%s\"}",
+                              in_row ? "," : "", el ? el : "", cd ? cd : "");
+        free(el);
+        free(cd);
+        in_row++;
+        if (in_row == 3 && i < count - 1) {
+            o += (size_t)snprintf(kb + o, sizeof(kb) - o, "],[");
+            in_row = 0;
+        }
+    }
+    snprintf(kb + o, sizeof(kb) - o, "]]}");
+
+    char cmd[8192];
+    snprintf(cmd, sizeof(cmd),
+        "curl -sS --max-time 20 "
+        "--data-urlencode 'chat_id=%lld' "
+        "--data-urlencode 'text=%s' "
+        "--data-urlencode 'reply_markup=%s' "
+        "https://api.telegram.org/bot%s/sendMessage",
+        chat_id, "Заработок по месяцам — выберите месяц:", kb, BOT_TOKEN);
+    run_curl(cmd);
+
+    for (int i = 0; i < count; i++) free(months[i]);
+    free(months);
+}
+
+/* Присылает в чат итог по выбранному месяцу. */
+static void tg_send_money_total(long long chat_id, const char *month) {
+    double hours = 0, sum = 0;
+    int days = 0;
+    char label[64];
+    tracking_month_label(month, label, sizeof(label));
+
+    if (tracking_month_total(month, &hours, &sum, &days) != 0) {
+        tg_send_text(chat_id, "Не удалось посчитать заработок за этот месяц.");
+        return;
+    }
+    if (days <= 0 && sum <= 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "%s: отметок нет.", label);
+        tg_send_text(chat_id, msg);
+        return;
+    }
+    char msg[512];
+    snprintf(msg, sizeof(msg),
+             "%s\nОтработано: %.2f ч. за %d дн.\nЗаработано: %.2f",
+             label, hours, days, sum);
+    tg_send_text(chat_id, msg);
 }
 
 /* Выполняет отметку и отправляет результат в чат. */
@@ -1161,6 +1236,9 @@ static void process_update(const char *body) {
                 bot_track(cid, "in");
             } else if (strstr(text, "Ушла") || strcmp(low, "/out") == 0) {
                 bot_track(cid, "out");
+            } else if (strstr(text, "Деньги") || strcmp(low, "/money") == 0 ||
+                       strcmp(low, "/zarabotok") == 0) {
+                tg_send_money_menu(cid);
             } else if (strstr(low, "/track") || strstr(low, "/time") ||
                        strstr(text, "Отметить") || strstr(text, "время")) {
                 tg_send_track_inline(cid);
@@ -1199,6 +1277,20 @@ static void process_update(const char *body) {
             if (strcmp(data, "trk_out") == 0) {
                 bot_track(cid, "out");
                 if (cqid) tg_answer(cqid, "Записано");
+                jfree(root);
+                return;
+            }
+            /* Кнопка «Деньги»: показать список месяцев */
+            if (strcmp(data, "trk_money") == 0) {
+                tg_send_money_menu(cid);
+                if (cqid) tg_answer(cqid, NULL);
+                jfree(root);
+                return;
+            }
+            /* Выбран месяц: присылаем сумму заработка за него */
+            if (strncmp(data, "mon:", 4) == 0) {
+                tg_send_money_total(cid, data + 4);
+                if (cqid) tg_answer(cqid, NULL);
                 jfree(root);
                 return;
             }

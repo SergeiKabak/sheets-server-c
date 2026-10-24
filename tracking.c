@@ -1558,6 +1558,106 @@ static void api_tracking_summary(int fd, const char *query) {
     free(name); free(month);
 }
 
+/* Название месяца по цифровому виду ("10.2026" -> "Октябрь 2026") */
+void tracking_month_label(const char *numeric, char *out, size_t cap) {
+    int mon = 0, year = 0;
+    if (numeric && sscanf(numeric, "%d.%d", &mon, &year) == 2 &&
+        mon >= 1 && mon <= 12) {
+        snprintf(out, cap, "%s %d", MONTH_NAMES[mon - 1], year);
+    } else {
+        snprintf(out, cap, "%s", numeric ? numeric : "");
+    }
+}
+
+/* Список вкладок-месяцев таблицы учёта времени ("10.2026", ...).
+   Возвращает 0 при успехе. В *count — число месяцев, в *out — массив
+   malloc-нутых строк (освобождает вызывающий). */
+int tracking_list_months(char ***out, int *count, int max) {
+    if (!out || !count || max <= 0) return -1;
+    *out = NULL;
+    *count = 0;
+
+    tracking_ensure_init();
+    if (!g_sheet_id && tracking_ensure_spreadsheet() != 0) return -1;
+    if (!g_sheet_id) return -1;
+    const char *tok = sa_access_token();
+    if (!tok) return -1;
+
+    char url[2048];
+    snprintf(url, sizeof(url),
+             "%s/v4/spreadsheets/%s?fields=sheets.properties.title",
+             g_api_base, g_sheet_id);
+    int status = 0;
+    char *resp = trk_curl("GET", url, NULL, NULL, tok, &status);
+    if (!resp || status != 200) { free(resp); return -1; }
+
+    char **list = calloc((size_t)max, sizeof(char *));
+    if (!list) { free(resp); return -1; }
+    int n = 0;
+    const char *p = resp;
+    while (n < max && (p = strstr(p, "\"title\"")) != NULL) {
+        p = strchr(p, ':');
+        if (!p) break;
+        p++;
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        if (*p != '"') break;
+        p++;
+        const char *st = p;
+        while (*p && *p != '"') p++;
+        size_t len = (size_t)(p - st);
+        char *name = malloc(len + 1);
+        if (!name) break;
+        memcpy(name, st, len); name[len] = '\0';
+        /* оставляем только вкладки-месяцы вида "10.2026" */
+        int mon = 0, year = 0;
+        if (sscanf(name, "%d.%d", &mon, &year) == 2 && mon >= 1 && mon <= 12)
+            list[n++] = name;
+        else
+            free(name);
+        p++;
+    }
+    free(resp);
+    *out = list;
+    *count = n;
+    return 0;
+}
+
+/* Итог за месяц (вкладка вида "10.2026"): часы, сумма, число дней. */
+int tracking_month_total(const char *month, double *hours, double *sum, int *days) {
+    if (hours) *hours = 0;
+    if (sum) *sum = 0;
+    if (days) *days = 0;
+    if (!month || !*month) return -1;
+
+    tracking_ensure_init();
+    if (!g_sheet_id && tracking_ensure_spreadsheet() != 0) return -1;
+    if (!g_sheet_id) return -1;
+
+    TRows rows;
+    memset(&rows, 0, sizeof(rows));
+    char *resp = sheets_get_values(month);
+    if (!resp) return -1;
+    parse_values_json(resp, &rows);
+    free(resp);
+
+    const char *sn = getenv("SEARCH_NAME");
+    char *name = (sn && *sn) ? strdup(sn) : NULL;
+    int block = name ? find_employee_block(&rows, name) : -1;
+    if (block >= 0) {
+        for (int i = block + 1; i < rows.count; i++) {
+            if (row_is_empty(&rows.row[i])) break;
+            if (cell_empty(rows.row[i].cell[0])) continue;
+            double h = atof_comm(rows.row[i].cell[3]);
+            double s = atof_comm(rows.row[i].cell[5]);
+            if (hours && h > 0) { *hours += h; if (days) (*days)++; }
+            if (sum && s > 0) *sum += s;
+        }
+    }
+    free(name);
+    trows_free(&rows);
+    return 0;
+}
+
 /* Инициализация конфигурации из переменных окружения.
    ВАЖНО: вызывается и из HTTP-обработчика (/api/tracking/...), и напрямую
    из Telegram-бота (tracking_do_clock). Раньше инициализация жила только

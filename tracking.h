@@ -25,6 +25,17 @@ void tracking_ensure_init(void);
  * method — HTTP-метод, path — путь с query-строкой, body — тело запроса (может быть NULL) */
 void tracking_handle(int fd, const char *method, const char *path, const char *body);
 
+/* Название месяца по цифровому виду ("10.2026" -> "Октябрь 2026"). */
+void tracking_month_label(const char *numeric, char *out, size_t cap);
+
+/* Список вкладок-месяцев таблицы учёта времени ("10.2026", ...).
+   Возвращает 0 при успехе; в *count — число месяцев, в *out — массив
+   malloc-нутых строк (освобождает вызывающий). */
+int tracking_list_months(char ***out, int *count, int max);
+
+/* Итог за месяц (вкладка вида "10.2026"): часы, сумма, число дней. */
+int tracking_month_total(const char *month, double *hours, double *sum, int *days);
+
 /* Выполняет отметку прихода/ухода программно (используется Telegram-ботом).
    action: "in" или "out". Возвращает HTTP-код (200/400/409/500),
    в out пишет JSON-ответ. */
