@@ -28,8 +28,6 @@
 #define MAX_CHATS 128
 #define MONTHS_FILE "/tmp/months.dat"
 #define CABINET_INDEX_FILE "/tmp/cabinet_index.txt"
-#define SVG_FILE     "/tmp/month.svg"
-#define PNG_FILE     "/tmp/month.png"
 
 static const char *BOT_TOKEN;
 static const char *SPREADSHEET_ID;
@@ -825,142 +823,7 @@ static int read_months(MonthEntry *mo, int max) {
     return got;
 }
 
-/* ================================================================
- * Генерация SVG-таблицы месяца
- * ================================================================ */
-typedef struct { char *p; size_t len; size_t cap; } StrB;
-
-static void sb_init(StrB *b, size_t cap) { b->p = malloc(cap); b->len = 0; b->cap = cap; b->p[0] = '\0'; }
-
-static void sb_printf(StrB *b, const char *fmt, ...) {
-    for (;;) {
-        va_list a;
-        va_start(a, fmt);
-        int need = vsnprintf(b->p + b->len, b->cap - b->len, fmt, a);
-        va_end(a);
-        if (need < 0) return;
-        if ((size_t)need < b->cap - b->len) { b->len += need; return; }
-        b->cap += (size_t)need * 2 + 1;
-        b->p = realloc(b->p, b->cap);
-    }
-}
-
-static void sb_put(StrB *b, const char *s) { sb_printf(b, "%s", s); }
-
-static char *std_escape(const char *s) {
-    size_t cap = strlen(s ? s : "") * 2 + 16, len = 0;
-    char *o = malloc(cap);
-    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; p++) {
-        if (len + 8 > cap) { cap *= 2; o = realloc(o, cap); }
-        if      (*p == '&') { memcpy(o + len, "&amp;", 5); len += 5; }
-        else if (*p == '<') { memcpy(o + len, "&lt;", 4);  len += 4; }
-        else if (*p == '>') { memcpy(o + len, "&gt;", 4);  len += 4; }
-        else if (*p == '"') { memcpy(o + len, "&quot;", 6); len += 6; }
-        else if (*p == '\''){ memcpy(o + len, "&#39;", 5); len += 5; }
-        else o[len++] = *p;
-    }
-    o[len] = '\0';
-    return o;
-}
-
 /* Строит SVG месяца в *out (malloc). Возвращает 1 при успехе. */
-static int build_svg(MonthEntry *m, char **out) {
-    int c1 = m->shift1_len, c2 = m->shift2_len;
-    int data_cols = c1 > c2 ? c1 : c2;
-    if (data_cols < 1) data_cols = 1;
-
-    const int name_colw = 220;
-    int colw = 1600 / data_cols;
-    if (colw < 48) colw = 48;
-    if (colw > 220) colw = 220;
-
-    const int rowh = 44;
-    const int headh = 40;
-    const int pad = 12;
-    const int rows = 2;
-    int width = name_colw + data_cols * colw + pad * 2 + 8;
-    int height = pad + headh + rows * rowh + pad + 8;
-
-    StrB b;
-    sb_init(&b, 65536);
-
-    sb_printf(&b, "<svg xmlns='http://www.w3.org/2000/svg' width='%d' height='%d' "
-                  "font-family='DejaVu Sans,Arial' font-size='%d'>",
-              width, height, colw > 100 ? 18 : 15);
-    /* фон */
-    sb_put(&b, "<rect width='100%' height='100%' fill='#ffffff'/>");
-    /* тень под таблицей */
-    sb_put(&b, "<rect x='9' y='9' width='");
-    sb_printf(&b, "%d", width - 12);
-    sb_put(&b, "' height='");
-    sb_printf(&b, "%d", height - 12);
-    sb_put(&b, "' rx='6' fill='#000000' opacity='0.18'/>");
-    /* рамка таблицы */
-    sb_put(&b, "<rect x='1' y='1' width='");
-    sb_printf(&b, "%d", width - 12);
-    sb_put(&b, "' height='");
-    sb_printf(&b, "%d", height - 12);
-    sb_put(&b, "' rx='6' fill='#ffffff' stroke='#c8c8c8' stroke-width='1'/>");
-
-    /* --- сама таблица --- */
-    int left = 13, top = 13;
-    int tw = width - 24;
-
-    /* шапка (зелёная) */
-    sb_printf(&b, "<rect x='%d' y='%d' width='%d' height='%d' fill='#4CAF50'/>", left, top, tw, headh);
-    /* первая колонка заголовка */
-    sb_printf(&b, "<text x='%d' y='%d' fill='#ffffff' font-weight='bold' text-anchor='middle' dominant-baseline='middle'>%s</text>",
-              left + name_colw / 2, top + headh / 2 + 1, std_escape(m->title));
-    /* остальные колонки */
-    for (int k = 0; k < data_cols; k++) {
-        int x = left + name_colw + k * colw;
-        sb_printf(&b, "<line x1='%d' y1='%d' x2='%d' y2='%d' stroke='#ffffff' stroke-width='1'/>",
-                  x, top, x, top + headh);
-        const char *hdr = (k == data_cols - 1) ? "Смен" : NULL;
-        char buf[32];
-        if (!hdr) { snprintf(buf, sizeof(buf), "%d", k); hdr = buf; }
-        sb_printf(&b, "<text x='%d' y='%d' fill='#ffffff' font-weight='bold' text-anchor='middle' dominant-baseline='middle'>%s</text>",
-                  x + colw / 2, top + headh / 2 + 1, hdr);
-    }
-
-    /* строки данных */
-    int lens[2] = { m->shift1_len, m->shift2_len };
-    char **rowse[2] = { m->shift1, m->shift2 };
-    for (int r = 0; r < 2; r++) {
-        int yy = top + headh + r * rowh;
-        sb_printf(&b, "<rect x='%d' y='%d' width='%d' height='%d' fill='%s'/>",
-                  left, yy, tw, rowh, (r % 2 == 1) ? "#f2f2f2" : "#ffffff");
-        /* первая колонка (ФИО / пусто) */
-        const char *name_val = (r == 0) ? SEARCH_NAME : "";
-        char *esc_name = std_escape(name_val);
-        sb_printf(&b, "<text x='%d' y='%d' fill='#222222' text-anchor='middle' dominant-baseline='middle'>%s</text>",
-                  left + name_colw / 2, yy + rowh / 2 + 1, esc_name);
-        free(esc_name);
-        /* вертикальная линия после имени */
-        sb_printf(&b, "<line x1='%d' y1='%d' x2='%d' y2='%d' stroke='#e0e0e0'/>",
-                  left + name_colw, yy, left + name_colw, yy + rowh);
-        /* данные по дням */
-        for (int k = 0; k < data_cols; k++) {
-            int x = left + name_colw + k * colw;
-            if (k > 0)
-                sb_printf(&b, "<line x1='%d' y1='%d' x2='%d' y2='%d' stroke='#e0e0e0'/>",
-                          x, yy, x, yy + rowh);
-            const char *val = (k < lens[r] && rowse[r][k]) ? rowse[r][k] : "";
-            char *esc = std_escape(val);
-            sb_printf(&b, "<text x='%d' y='%d' fill='#222222' text-anchor='middle' dominant-baseline='middle'>%s</text>",
-                      x + colw / 2, yy + rowh / 2 + 1, esc);
-            free(esc);
-        }
-    }
-    sb_put(&b, "</svg>");
-
-    *out = b.p;
-    return 1;
-}
-
-/* ================================================================
- * Telegram API
- * ================================================================ */
 static char *json_escape(const char *s) {
     size_t cap = strlen(s ? s : "") * 2 + 16, len = 0;
     char *o = malloc(cap);
@@ -1003,23 +866,6 @@ static void tg_send_text_kb(long long chat_id, const char *text) {
     run_curl(cmd);
 }
 
-static void tg_photo(long long chat_id, const char *title) {
-    char *t = json_escape(title ? title : "");
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd),
-        "curl -sS --max-time 45 "
-        "-F 'chat_id=%lld' "
-        "-F 'photo=@%s' "
-        "-F 'reply_markup={\"inline_keyboard\":[["
-        "{\"text\":\"Назад\",\"callback_data\":\"prev\"},"
-        "{\"text\":\"%s\",\"callback_data\":\"noop\"},"
-        "{\"text\":\"Вперёд\",\"callback_data\":\"next\"}]]}' "
-        "https://api.telegram.org/bot%s/sendPhoto",
-        chat_id, PNG_FILE, t, BOT_TOKEN);
-    free(t);
-    run_curl(cmd);
-}
-
 /* Подтверждает нажатие на inline-кнопку.
    id в Telegram — строка (например "4382bfdwdsb323b2d9"), поэтому принимаем const char*.
    text передаётся как POST-параметр с --data-urlencode (корректный URL-кодинг). */
@@ -1043,20 +889,6 @@ static void tg_answer(const char *cq_id, const char *text) {
     run_curl(cmd);
 }
 
-/* Строит SVG, рендерит через ImageMagick в PNG. 0 при успехе */
-static int render_month(MonthEntry *m) {
-    char *svg = NULL;
-    if (!build_svg(m, &svg)) return -1;
-    FILE *fp = fopen(SVG_FILE, "w");
-    if (!fp) { free(svg); return -1; }
-    fwrite(svg, 1, strlen(svg), fp);
-    fclose(fp);
-    free(svg);
-
-    char cmd[4096];
-    snprintf(cmd, sizeof(cmd), "convert -background white '%s' '%s' 2>/dev/null", SVG_FILE, PNG_FILE);
-    return (run_curl(cmd) == 0) ? 0 : -1;
-}
 
 /* ================================================================
  * Состояние чатов и отдача графика
@@ -1078,11 +910,12 @@ static int pick_current_index(MonthEntry *mo, int count) {
 }
 
 static void show_index(long long cid, int idx, MonthEntry *mo, int count) {
-    if (idx < 0 || idx >= count) { tg_send_text(cid, "Нет данных по графикам."); return; }
-    if (render_month(&mo[idx]) == 0)
-        tg_photo(cid, mo[idx].title);
-    else
-        tg_send_text(cid, "Не удалось сформировать картинку графика.");
+    if (idx < 0 || idx >= count) { tg_send_text_kb(cid, "Нет данных по графикам."); return; }
+    char label[64];
+    tracking_month_label(mo[idx].title, label, sizeof(label));
+    char msg[256];
+    snprintf(msg, sizeof(msg), "График: %s", label);
+    tg_send_text_kb(cid, msg);
 }
 
 static const char HELP_MSG[] =
