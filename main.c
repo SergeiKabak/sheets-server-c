@@ -1423,7 +1423,7 @@ static void api_months(int fd) {
 /* Отдаёт JSON месяца по ?name=... */
 static void api_month(int fd, const char *query) {
     const char *p = strstr(query, "name=");
-    if (!p) { http_reply(fd, "400 Bad Request", "{\"error\":\"missing name\"}"); return; }
+    if (!p) { http_reply(fd, "400 Bad Request", "{\"error\":\"не указано имя\"}"); return; }
     p += 5;
     char name[256];
     url_decode(name, sizeof(name), p);
@@ -1435,7 +1435,7 @@ static void api_month(int fd, const char *query) {
     for (int i = 0; i < count; i++) {
         if (strcmp(mo[i].title, name) == 0) { idx = i; break; }
     }
-    if (idx < 0) { http_reply(fd, "404 Not Found", "{\"error\":\"not found\"}"); return; }
+    if (idx < 0) { http_reply(fd, "404 Not Found", "{\"error\":\"не найдено\"}"); return; }
 
     MonthEntry *m = &mo[idx];
     int c1 = m->shift1_len, c2 = m->shift2_len;
@@ -1481,7 +1481,7 @@ static void api_cabinet(int fd, const char *query) {
     const char *p_day   = strstr(query, "day=");
     const char *p_shift = strstr(query, "shift=");
     if (!p_month || !p_cab || !p_day) {
-        http_reply(fd, "400 Bad Request", "{\"error\":\"missing params\"}");
+        http_reply(fd, "400 Bad Request", "{\"error\":\"не хватает параметров\"}");
         return;
     }
     p_month += 6;
@@ -1618,10 +1618,10 @@ static int handle_conn(int client_fd) {
                  "{\"commit\":\"%s\",\"branch\":\"%s\","
                  "\"track_buttons\":\"Пришла/Ушла\","
                  "\"miniapp_url\":\"%s\",\"menu_button\":\"%s\"}",
-                 sha    ? sha    : "unknown",
-                 branch ? branch : "unknown",
-                 (MINIAPP_URL && *MINIAPP_URL) ? "set" : "missing",
-                 (MINIAPP_URL && *MINIAPP_URL) ? "web_app График" : "none");
+                 sha    ? sha    : "неизвестно",
+                 branch ? branch : "неизвестно",
+                 (MINIAPP_URL && *MINIAPP_URL) ? "задан" : "не задан",
+                 (MINIAPP_URL && *MINIAPP_URL) ? "web_app График" : "нет");
         http_reply(client_fd, "200 OK", json);
         return 0;
     }
@@ -1651,7 +1651,7 @@ static int handle_conn(int client_fd) {
         FILE *fp = fopen(CABINET_INDEX_FILE, "r");
         if (!fp) {
             http_reply(client_fd, "503 Service Unavailable",
-                       "{\"error\":\"index not ready\"}");
+                       "{\"error\":\"индекс ещё не готов\"}");
             return 0;
         }
         long lines = 0;

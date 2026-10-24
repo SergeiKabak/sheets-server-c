@@ -408,8 +408,8 @@ static const char *sa_access_token(void) {
     char *turi  = json_get_string(g_sa_json, "token_uri");
     if (!email || !pkey) {
         snprintf(g_last_error, sizeof(g_last_error),
-                 "service account JSON invalid: client_email=%s private_key=%s",
-                 email ? "ok" : "MISSING", pkey ? "ok" : "MISSING");
+                 "неверный JSON сервисного аккаунта: client_email=%s private_key=%s",
+                 email ? "есть" : "НЕТ", pkey ? "есть" : "НЕТ");
         trk_log("%s", g_last_error);
         free(email); free(pkey); free(turi);
         return NULL;
@@ -487,8 +487,8 @@ static const char *sa_access_token(void) {
 
     if (!resp || status != 200) {
         snprintf(g_last_error, sizeof(g_last_error),
-                 "token request failed status=%d body=%.180s",
-                 status, resp ? resp : "(no response)");
+                 "не удалось получить токен доступа: код %d, ответ %.180s",
+                 status, resp ? resp : "(нет ответа)");
         trk_log("%s", g_last_error);
         free(resp);
         return NULL;
@@ -500,7 +500,7 @@ static const char *sa_access_token(void) {
     if (e) { long v = atol(e); if (v > 60) exp = v; free(e); }
     free(resp);
     if (!tok) {
-        snprintf(g_last_error, sizeof(g_last_error), "no access_token in response");
+        snprintf(g_last_error, sizeof(g_last_error), "в ответе Google нет access_token");
         trk_log("%s", g_last_error);
         return NULL;
     }
@@ -607,8 +607,8 @@ static int detect_api_disabled(const char *resp) {
             proj[i] = '\0';
         }
         snprintf(g_last_error, sizeof(g_last_error),
-                 "Google Sheets API is DISABLED in project %s. "
-                 "Enable it: https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=%s",
+                 "Google Sheets API отключён в проекте %s. "
+                 "Включите его: https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=%s",
                  proj[0] ? proj : "(unknown)", proj[0] ? proj : "YOUR_PROJECT");
         trk_log("%s", g_last_error);
         return 1;
@@ -658,7 +658,7 @@ static char *sheets_get_values(const char *sheet_name) {
     if (status != 200) {
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
-                     "sheets_get_values status=%d resp=%.160s", status, resp);
+                     "ошибка чтения таблицы: код %d, ответ %.160s", status, resp);
         trk_log("%s", g_last_error);
         free(resp);
         return NULL;
@@ -690,7 +690,7 @@ static int sheets_append_row(const char *sheet_name, const char *values_json) {
     if (status != 200) {
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
-                     "sheets_append_row status=%d resp=%.160s", status, resp);
+                     "ошибка добавления строки: код %d, ответ %.160s", status, resp);
         trk_log("%s", g_last_error);
         free(resp);
         return -1;
@@ -724,7 +724,7 @@ static int sheets_update_values_raw(const char *sheet_name, const char *a1_suffi
     if (status != 200) {
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
-                     "sheets_update_values_raw status=%d resp=%.160s", status, resp);
+                     "ошибка записи значений: код %d, ответ %.160s", status, resp);
         trk_log("%s", g_last_error);
         free(resp);
         return -1;
@@ -758,7 +758,7 @@ static int sheets_update_range(const char *sheet_name, const char *a1_suffix,
     if (status != 200) {
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
-                     "sheets_update_range status=%d resp=%.160s", status, resp);
+                     "ошибка обновления диапазона: код %d, ответ %.160s", status, resp);
         trk_log("%s", g_last_error);
         free(resp);
         return -1;
@@ -796,7 +796,7 @@ static int sheets_create_sheet(const char *sheet_name) {
         }
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
-                     "sheets_create_sheet status=%d resp=%.160s", status, resp);
+                     "ошибка создания листа: код %d, ответ %.160s", status, resp);
         trk_log("%s", g_last_error);
         free(resp);
         return -1;
@@ -1315,27 +1315,27 @@ static char *resolve_employee(const char *init_data) {
 int tracking_do_clock(const char *action, char *out, size_t cap) {
     /* Бот вызывает эту функцию напрямую (без HTTP), поэтому конфигурацию
        нужно подготовить здесь же — иначе не будет ключа сервисного аккаунта
-       и ID таблицы ("cannot access sheet"). */
+       и ID таблицы ("нет доступа к таблице"). */
     tracking_ensure_init();
     if (!g_sheet_id) {
         if (tracking_ensure_spreadsheet() != 0) {
             char *e = json_escape_local(g_last_error[0] ? g_last_error
-                                        : "cannot access sheet");
-            snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "cannot access sheet");
+                                        : "нет доступа к таблице");
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "нет доступа к таблице");
             free(e);
             return 500;
         }
     }
 
     if (!action || !*action) {
-        snprintf(out, cap, "{\"ok\":false,\"error\":\"no action\"}");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"не указано действие\"}");
         return 400;
     }
 
     const char *sn = getenv("SEARCH_NAME");
     char *name = sn && *sn ? strdup(sn) : strdup("Сотрудник");
     if (!name) {
-        snprintf(out, cap, "{\"ok\":false,\"error\":\"no name\"}");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"не указано имя сотрудника\"}");
         return 500;
     }
 
@@ -1356,8 +1356,8 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
         trows_free(&rows);
         free(name);
         char *e = json_escape_local(g_last_error[0] ? g_last_error
-                                    : "cannot access sheet");
-        snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "cannot access sheet");
+                                    : "нет доступа к таблице");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "нет доступа к таблице");
         free(e);
         return 500;
     }
@@ -1406,7 +1406,7 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
         }
 
         if (sheets_write_rows(g_current_sheet, &rows) != 0) {
-            snprintf(out, cap, "{\"ok\":false,\"error\":\"write failed\"}");
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"не удалось записать в таблицу\"}");
             code = 500;
             goto finish;
         }
@@ -1419,12 +1419,12 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
 
     } else if (strcmp(action, "out") == 0) {
         if (date_row < 0 || cell_empty(rows.row[date_row].cell[1])) {
-            snprintf(out, cap, "{\"ok\":false,\"error\":\"no clock-in for today\"}");
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"сегодня не отмечен приход\"}");
             code = 409;
             goto finish;
         }
         if (!cell_empty(rows.row[date_row].cell[2])) {
-            snprintf(out, cap, "{\"ok\":false,\"error\":\"already clocked out\"}");
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"уход уже отмечен сегодня\"}");
             code = 409;
             goto finish;
         }
@@ -1455,7 +1455,7 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
         }
 
         if (sheets_write_rows(g_current_sheet, &rows) != 0) {
-            snprintf(out, cap, "{\"ok\":false,\"error\":\"write failed\"}");
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"не удалось записать в таблицу\"}");
             code = 500;
             goto finish;
         }
@@ -1469,7 +1469,7 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
                 name, date, time_s, hours_buf, sum_buf);
 
     } else {
-        snprintf(out, cap, "{\"ok\":false,\"error\":\"bad action\"}");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неизвестное действие\"}");
         code = 400;
     }
 
@@ -1513,7 +1513,7 @@ static void api_tracking_summary(int fd, const char *query) {
 
     if (!g_sheet_id) {
         trk_reply(fd, "503 Service Unavailable",
-                  "{\"ok\":false,\"error\":\"tracking sheet not configured\"}");
+                  "{\"ok\":false,\"error\":\"таблица учёта времени не настроена\"}");
         free(name); free(month);
         return;
     }
@@ -1523,7 +1523,7 @@ static void api_tracking_summary(int fd, const char *query) {
     char *resp = sheets_get_values(sheet);
     if (!resp) {
         trk_reply(fd, "503 Service Unavailable",
-                  "{\"ok\":false,\"error\":\"sheet not ready\"}");
+                  "{\"ok\":false,\"error\":\"таблица ещё не готова\"}");
         free(name); free(month);
         return;
     }
@@ -1562,7 +1562,7 @@ static void api_tracking_summary(int fd, const char *query) {
    ВАЖНО: вызывается и из HTTP-обработчика (/api/tracking/...), и напрямую
    из Telegram-бота (tracking_do_clock). Раньше инициализация жила только
    внутри tracking_handle(), из-за чего бот работал без ключа сервисного
-   аккаунта и без ID таблицы ("cannot access sheet"), а Mini App — работал. */
+   аккаунта и без ID таблицы ("нет доступа к таблице"), а Mini App — работал. */
 void tracking_ensure_init(void) {
     if (g_inited) return;
     g_inited = 1;
@@ -1578,7 +1578,7 @@ void tracking_ensure_init(void) {
     g_drive_base = (dbase && *dbase) ? (char *)dbase : (char *)"https://www.googleapis.com";
     trk_log("init: sheet=%s sa=%s rate=%.0f tz=%d",
             g_sheet_id ? g_sheet_id : "(null)",
-            g_sa_json ? "yes" : "no",
+            g_sa_json ? "есть" : "нет",
             g_default_rate, g_tz_offset);
 }
 
@@ -1592,7 +1592,7 @@ void tracking_handle(int fd, const char *method, const char *path, const char *b
         int rc = tracking_ensure_spreadsheet();
         if (rc != 0 && strcmp(path, "/diag/tracking") != 0) {
             trk_reply(fd, "503 Service Unavailable",
-                      "{\"ok\":false,\"error\":\"tracking sheet not configured\"}");
+                      "{\"ok\":false,\"error\":\"таблица учёта времени не настроена\"}");
             return;
         }
     }
@@ -1609,7 +1609,7 @@ void tracking_handle(int fd, const char *method, const char *path, const char *b
         api_tracking_diag(fd, path);
         return;
     }
-    trk_reply(fd, "404 Not Found", "{\"ok\":false,\"error\":\"not found\"}");
+    trk_reply(fd, "404 Not Found", "{\"ok\":false,\"error\":\"не найдено\"}");
 }
 
 /* ==================================================================
@@ -1638,7 +1638,7 @@ static char *sheets_create_spreadsheet(const char *title) {
     if (status != 200) {
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
-                     "sheets_create_spreadsheet status=%d resp=%.160s", status, resp);
+                     "ошибка создания таблицы: код %d, ответ %.160s", status, resp);
         trk_log("%s", g_last_error);
         free(resp);
         return NULL;
@@ -1718,7 +1718,7 @@ static int tracking_ensure_spreadsheet(void) {
             return 0;
         }
         snprintf(g_last_error, sizeof(g_last_error),
-                 "TRACKING_SHEET_ID=%s not accessible with current credentials", env_id);
+                 "TRACKING_SHEET_ID=%s недоступен с текущими учётными данными", env_id);
         trk_log("%s", g_last_error);
     }
 
@@ -1744,11 +1744,11 @@ static int tracking_ensure_spreadsheet(void) {
     if (!new_id) {
         if (!g_last_error[0])
             snprintf(g_last_error, sizeof(g_last_error),
-                     "cannot create spreadsheet (need Service Account with spreadsheets scope)");
+                     "не удалось создать таблицу (нужен Service Account с доступом к spreadsheets)");
         if (strstr(g_last_error, "does not have permission"))
             snprintf(g_last_error, sizeof(g_last_error),
-                     "Service Account cannot create spreadsheets. Set TRACKING_SHEET_ID "
-                     "to the existing Time tracking spreadsheet id.");
+                     "Service Account не может создавать таблицы. Задайте TRACKING_SHEET_ID "
+                     "— ID существующей таблицы Time tracking.");
         trk_log("%s", g_last_error);
         return -1;
     }
@@ -1805,10 +1805,10 @@ static void api_tracking_diag(int fd, const char *query) {
     APPEND(",\"share_email\":\"%s\"",
                   getenv("TRACKING_SHARE_EMAIL") ? getenv("TRACKING_SHARE_EMAIL") : "");
     APPEND(",\"emp_map\":\"%s\"",
-                  "n/a");
+                  "не требуется");
     APPEND(",\"rate\":\"%.0f\"", g_default_rate);
     APPEND(",\"rates_map\":\"%s\"",
-                  "n/a");
+                  "не требуется");
     APPEND(",\"tz_offset\":\"%d\"", g_tz_offset);
 
     /* 4) список вкладок */
