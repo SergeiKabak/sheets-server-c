@@ -302,205 +302,38 @@ static void free_rows(char **rows, int *lens, int count) {
 /* ================================================================
  * Рекурсивный JSON-парсер в дерево (для Telegram update)
  * ================================================================ */
-typedef struct JNode JNode;
-struct JNode {
-    int type;        /* 0 null, 1 bool, 2 num, 3 str, 4 arr, 5 obj */
-    int bval;
-    double num;
-    char *str;
-    JNode **items;
-    int nitems;
-    char **keys;
-    JNode **vals;
-    int nvals;
-};
+#include "cJSON.h"
 
-static int hexv(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return 0;
-}
-
-static void utf8put(char **out, size_t *len, size_t *cap, unsigned cp) {
-    if (cp < 0x80) {
-        if (*len + 1 > *cap) { *cap *= 2; *out = realloc(*out, *cap); }
-        (*out)[(*len)++] = (char)cp;
-    } else if (cp < 0x800) {
-        if (*len + 2 > *cap) { *cap *= 2; *out = realloc(*out, *cap); }
-        (*out)[(*len)++] = (char)(0xC0 | (cp >> 6));
-        (*out)[(*len)++] = (char)(0x80 | (cp & 0x3F));
-    } else {
-        if (*len + 3 > *cap) { *cap *= 2; *out = realloc(*out, *cap); }
-        (*out)[(*len)++] = (char)(0xE0 | (cp >> 12));
-        (*out)[(*len)++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-        (*out)[(*len)++] = (char)(0x80 | (cp & 0x3F));
-    }
-}
-
-static void jskip(const char **p) {
-    while (**p == ' ' || **p == '\t' || **p == '\n' || **p == '\r') (*p)++;
-}
-
-static char *jparse_string(const char **p) {
-    const char *s = *p;
-    if (*s != '"') return NULL;
-    s++;
-    size_t cap = 16, len = 0;
-    char *o = malloc(cap);
-    while (*s && *s != '"') {
-        if (*s == '\\') {
-            s++;
-            char c = *s;
-            switch (c) {
-                case 'n': c = '\n'; break;
-                case 't': c = '\t'; break;
-                case 'r': c = '\r'; break;
-                case 'b': c = '\b'; break;
-                case 'f': c = '\f'; break;
-                case '/': c = '/'; break;
-                case '\\': c = '\\'; break;
-                case '"': c = '"'; break;
-                case 'u': {
-                    unsigned cp = 0;
-                    s++;
-                    for (int i = 0; i < 4; i++) cp = (cp << 4) + hexv(s[i]);
-                    utf8put(&o, &len, &cap, cp);
-                    s += 4;
-                    continue;
-                }
-                default: s++; continue;
-            }
-            if (len + 1 > cap) { cap *= 2; o = realloc(o, cap); }
-            o[len++] = c;
-            s++;
-        } else {
-            if (len + 1 > cap) { cap *= 2; o = realloc(o, cap); }
-            o[len++] = *s;
-            s++;
-        }
-    }
-    if (*s == '"') s++;
-    o[len] = '\0';
-    *p = s;
-    return o;
-}
-
-static JNode *jvalue(const char **p);
-
-static JNode *jarray(const char **p) {
-    JNode *n = calloc(1, sizeof(JNode));
-    n->type = 4;
-    int cap = 4;
-    n->items = malloc(sizeof(JNode *) * cap);
-    (*p)++; /* '[' */
-    jskip(p);
-    while (**p && **p != ']') {
-        JNode *v = jvalue(p);
-        if (!v) break;
-        if (n->nitems >= cap) { cap *= 2; n->items = realloc(n->items, sizeof(JNode *) * cap); }
-        n->items[n->nitems++] = v;
-        jskip(p);
-        if (**p == ',') { (*p)++; jskip(p); }
-    }
-    if (**p == ']') (*p)++;
-    return n;
-}
-
-static JNode *jobject(const char **p) {
-    JNode *n = calloc(1, sizeof(JNode));
-    n->type = 5;
-    int cap = 4;
-    n->keys = malloc(sizeof(char *) * cap);
-    n->vals = malloc(sizeof(JNode *) * cap);
-    (*p)++; /* '{' */
-    jskip(p);
-    while (**p && **p != '}') {
-        char *k = jparse_string(p);
-        if (!k) break;
-        jskip(p);
-        if (**p == ':') (*p)++;
-        jskip(p);
-        JNode *v = jvalue(p);
-        if (!v) { free(k); break; }
-        if (n->nvals >= cap) {
-            cap *= 2;
-            n->keys = realloc(n->keys, sizeof(char *) * cap);
-            n->vals = realloc(n->vals, sizeof(JNode *) * cap);
-        }
-        n->keys[n->nvals] = k;
-        n->vals[n->nvals] = v;
-        n->nvals++;
-        jskip(p);
-        if (**p == ',') { (*p)++; jskip(p); }
-    }
-    if (**p == '}') (*p)++;
-    return n;
-}
-
-static JNode *jvalue(const char **p) {
-    jskip(p);
-    if (!**p) return NULL;
-    JNode *n;
-    if (**p == '{') return jobject(p);
-    if (**p == '[') return jarray(p);
-    if (**p == '"') {
-        n = calloc(1, sizeof(JNode));
-        n->type = 3;
-        n->str = jparse_string(p);
-        return n;
-    }
-    if (strncmp(*p, "true", 4) == 0) { *p += 4; n = calloc(1, sizeof(JNode)); n->type = 1; n->bval = 1; return n; }
-    if (strncmp(*p, "false", 5) == 0) { *p += 5; n = calloc(1, sizeof(JNode)); n->type = 1; return n; }
-    if (strncmp(*p, "null", 4) == 0) { *p += 4; n = calloc(1, sizeof(JNode)); n->type = 0; return n; }
-    n = calloc(1, sizeof(JNode));
-    n->type = 2;
-    n->num = strtod(*p, (char **)p);
-    return n;
-}
+typedef cJSON JNode;
 
 static JNode *jparse(const char *json) {
-    const char *p = json;
-    JNode *root = jvalue(&p);
-    return root;
+    return cJSON_Parse(json);
 }
 
 static void jfree(JNode *n) {
-    if (!n) return;
-    if (n->type == 3) free(n->str);
-    for (int i = 0; i < n->nitems; i++) jfree(n->items[i]);
-    free(n->items);
-    for (int i = 0; i < n->nvals; i++) { free(n->keys[i]); jfree(n->vals[i]); }
-    free(n->keys);
-    free(n->vals);
-    free(n);
+    cJSON_Delete(n);
+}
+
+static const char *jstr(JNode *n) {
+    return n ? cJSON_GetStringValue(n) : NULL;
+}
+
+static long long jll(JNode *n) {
+    return n ? (long long)cJSON_GetNumberValue(n) : 0;
 }
 
 /* Находит узел по пути через точки, напр. "message.chat.id" */
 static JNode *jfind(JNode *root, const char *path) {
     if (!root || !path) return NULL;
+    JNode *cur = root;
     char buf[256];
     snprintf(buf, sizeof(buf), "%s", path);
-    JNode *cur = root;
     char *save = NULL;
     for (char *tok = strtok_r(buf, ".", &save); tok; tok = strtok_r(NULL, ".", &save)) {
-        if (cur->type != 5) return NULL;
-        JNode *next = NULL;
-        for (int i = 0; i < cur->nvals; i++) {
-            if (strcmp(cur->keys[i], tok) == 0) { next = cur->vals[i]; break; }
-        }
-        if (!next) return NULL;
-        cur = next;
+        cur = cJSON_GetObjectItemCaseSensitive(cur, tok);
+        if (!cur) return NULL;
     }
     return cur;
-}
-
-static const char *jstr(JNode *n) {
-    return (n && n->type == 3 && n->str) ? n->str : NULL;
-}
-
-static long long jll(JNode *n) {
-    return (n && n->type == 2) ? (long long)n->num : 0;
 }
 
 /* ================================================================
