@@ -988,7 +988,7 @@ static void tg_send_text(long long chat_id, const char *text) {
 }
 
 /* Клавиатура учёта времени (Пришла / Ушла / Деньги) в JSON-виде. */
-#define TRACK_KEYBOARD_JSON "{\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"}],{\"text\":\"Деньги\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
+#define TRACK_KEYBOARD_JSON "{\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"},{\"text\":\"Деньги\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
 
 /* Отправляет текст вместе с клавиатурой — так клавиатура всегда остаётся
    на экране, даже если пользователь её раньше скрыл. */
@@ -1102,7 +1102,7 @@ static void tg_send_track_menu(long long chat_id) {
         "curl -sS --max-time 20 "
         "--data-urlencode 'chat_id=%lld' "
         "--data-urlencode 'text=%s' "
-        "--data-urlencode 'reply_markup={\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"}],{\"text\":\"Деньги\"}]],\"resize_keyboard\":true,\"is_persistent\":true}' "
+        "--data-urlencode 'reply_markup={\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"},{\"text\":\"Деньги\"}]],\"resize_keyboard\":true,\"is_persistent\":true}' "
         "https://api.telegram.org/bot%s/sendMessage",
         chat_id, "Отметьте рабочее время:", BOT_TOKEN);
     run_curl(cmd);
@@ -1385,6 +1385,7 @@ static void serve_miniapp(int fd) {
         ".trk .row{display:flex;gap:8px}"
         ".trk button{flex:1;padding:12px;border:none;border-radius:6px;color:#fff;font-size:15px;cursor:pointer}"
         ".trk .in{background:#2E7D32}"
+        ".trk .mn{background:#1565C0}"
         ".trk .out{background:#C62828}"
         ".trk button:disabled{opacity:.5}"
         ".trk .st{margin-top:8px;font-size:13px;color:var(--fg);opacity:.8}"
@@ -1473,11 +1474,26 @@ static void serve_miniapp(int fd) {
         "if(!dd||!dd.ok)return;"
         "trkMsg('Отработано за '+(dd.month||'')+': '+dd.total_hours+' ч., сумма '+dd.total_sum,true);"
         "}).catch(function(){trkMsg('Не удалось загрузить статистику',false);});}"
+        "function trkMoney(){"
+        "var b=document.getElementById('trk-money');if(b)b.disabled=true;"
+        "trkMsg('Считаем заработок...',true);"
+        "fetch('/api/tracking/months').then(function(r){return r.json();}).then(function(d){"
+        "if(!d||!d.ok||!d.months||!d.months.length){trkMsg('Нет данных о заработке',false);return;}"
+        "var ps=d.months.map(function(m){"
+        "return fetch('/api/tracking/summary?month='+encodeURIComponent(m.tab)).then(function(r){return r.json();})"
+        ".then(function(s){return {label:m.label,h:s.total_hours,sum:s.total_sum};});});"
+        "return Promise.all(ps).then(function(list){"
+        "var t='Заработок по месяцам:\\n';"
+        "list.forEach(function(x){t+=x.label+': '+x.h+' ч., '+x.sum+'\\n';});"
+        "trkMsg(t,true);});"
+        "}).catch(function(){trkMsg('Не удалось загрузить заработок',false);})"
+        ".then(function(){if(b)b.disabled=false;});}"
         "function trkInit(){"
-        "var b1=document.getElementById('trk-in'),b2=document.getElementById('trk-out');"
+        "var b1=document.getElementById('trk-in'),b2=document.getElementById('trk-out'),bm=document.getElementById('trk-money');"
         "if(!b1||!b2)return;"
         "b1.onclick=function(){b1.disabled=true;trkMsg('Сохраняем...',true);trkPost('in',function(){b1.disabled=false;trkStatus();});};"
         "b2.onclick=function(){b2.disabled=true;trkMsg('Сохраняем...',true);trkPost('out',function(){b2.disabled=false;trkStatus();});};"
+        "if(bm)bm.onclick=trkMoney;"
         "trkStatus();}"
 
         "</script>"
@@ -1487,6 +1503,7 @@ static void serve_miniapp(int fd) {
         "<div class='trk'><h3>Учёт рабочего времени</h3>"
         "<div class='row'><button id='trk-in' class='in'>Пришла</button>"
         "<button id='trk-out' class='out'>Ушла</button></div>"
+        "<div class='row' style='margin-top:8px'><button id='trk-money' class='mn'>Деньги</button></div>"
         "<div class='st' id='trk-st'></div></div>"
         "</div></body></html>";
 

@@ -1682,6 +1682,41 @@ void tracking_ensure_init(void) {
             g_default_rate, g_tz_offset);
 }
 
+/* GET /api/tracking/months -> список месяцев с заработком.
+   {"ok":true,"months":[{"tab":"10.2026","label":"Октябрь 2026"}, ...]} */
+static void api_tracking_months(int fd) {
+    char **months = NULL;
+    int count = 0;
+    if (tracking_list_months(&months, &count, 24) != 0 || count == 0) {
+        if (months) {
+            for (int i = 0; i < count; i++) free(months[i]);
+            free(months);
+        }
+        trk_reply(fd, "200 OK", "{\"ok\":true,\"months\":[]}");
+        return;
+    }
+
+    char msg[2048];
+    size_t o = 0;
+    o += (size_t)snprintf(msg + o, sizeof(msg) - o, "{\"ok\":true,\"months\":[");
+    for (int i = 0; i < count && o < sizeof(msg) - 256; i++) {
+        char label[64];
+        tracking_month_label(months[i], label, sizeof(label));
+        char *et = json_escape_local(months[i]);
+        char *el = json_escape_local(label);
+        o += (size_t)snprintf(msg + o, sizeof(msg) - o,
+                              "%s{\"tab\":\"%s\",\"label\":\"%s\"}",
+                              i ? "," : "", et ? et : "", el ? el : "");
+        free(et);
+        free(el);
+    }
+    snprintf(msg + o, sizeof(msg) - o, "]}");
+    trk_reply(fd, "200 OK", msg);
+
+    for (int i = 0; i < count; i++) free(months[i]);
+    free(months);
+}
+
 /* Точка входа */
 void tracking_handle(int fd, const char *method, const char *path, const char *body) {
     tracking_ensure_init();
@@ -1703,6 +1738,10 @@ void tracking_handle(int fd, const char *method, const char *path, const char *b
     }
     if (strncmp(path, "/api/tracking/summary", 20) == 0) {
         api_tracking_summary(fd, path);
+        return;
+    }
+    if (strcmp(path, "/api/tracking/months") == 0) {
+        api_tracking_months(fd);
         return;
     }
     if (strcmp(path, "/diag/tracking") == 0) {
