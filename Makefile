@@ -10,7 +10,7 @@ CFLAGS_NATIVE = -O2 -Wall -Wextra
 
 TARGET_ARM = sheet
 TARGET_NATIVE = server_app
-SRC = main.c tracking.c cJSON.c
+SRC = main.c tracking.c cJSON.c http.c
 
 .PHONY: all build run clean
 
@@ -18,14 +18,14 @@ all: build
 
 # Сборка нативного бинарника
 build:
-	$(CC_NATIVE) $(CFLAGS_NATIVE) -o $(TARGET_NATIVE) $(SRC)
+	$(CC_NATIVE) $(CFLAGS_NATIVE) -o $(TARGET_NATIVE) $(SRC) -l:libcurl.so.4
 	@echo "Size:"
 	@ls -lh $(TARGET_NATIVE)
 	@file $(TARGET_NATIVE)
 
 # Сборка ARM-бинарника (для справки)
 arm:
-	$(CC_ARM) $(CFLAGS_ARM) -o $(TARGET_ARM) $(SRC) $(LDFLAGS_ARM)
+	$(CC_ARM) $(CFLAGS_ARM) -o $(TARGET_ARM) $(SRC) $(LDFLAGS_ARM) -l:libcurl.so.4
 	@echo "Size:"
 	@ls -lh $(TARGET_ARM)
 	@file $(TARGET_ARM)

@@ -20,6 +20,8 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <sys/stat.h>
+#include "http.h"
+#include "http.h"
 
 static double atof_comm(const char *s) {
     if (!s) return 0.0;
@@ -256,81 +258,7 @@ static char *json_escape_local(const char *s) {
 
 /* ---------- HTTP-запрос через curl ---------- */
 /* Возвращает тело ответа; *status — HTTP-код (0 при ошибке). */
-static char *trk_curl(const char *method, const char *url,
-                      const char *content_type, const char *body,
-                      const char *bearer, int *status) {
-    if (status) *status = 0;
-    /* ВАЖНО: учитываем длину всех частей команды, иначе snprintf обрежет
-       строку (например, длинный Bearer-токен) и shell получит битую команду. */
-    size_t cmdlen = strlen(url) + (body ? strlen(body) : 0) +
-                     (bearer ? strlen(bearer) : 0) +
-                     (content_type ? strlen(content_type) : 0) + 2048;
-    char *cmd = malloc(cmdlen);
-    if (!cmd) return NULL;
 
-    /* Тело и заголовки оборачиваем в одинарные кавычки, экранируя ' */
-    char *qbody = NULL;
-    if (body) {
-        size_t bl = strlen(body);
-        qbody = malloc(bl * 4 + 16);
-        if (!qbody) { free(cmd); return NULL; }
-        size_t o = 0;
-        qbody[o++] = '\'';
-        for (size_t i = 0; i < bl; i++) {
-            if (body[i] == '\'') {
-                qbody[o++] = '\''; qbody[o++] = '\\'; qbody[o++] = '\''; qbody[o++] = '\'';
-            } else {
-                qbody[o++] = body[i];
-            }
-        }
-        qbody[o++] = '\'';
-        qbody[o] = '\0';
-    }
-
-    size_t o = 0;
-    /* APPEND безопасно: если места не хватит — команда обрежется, но не выйдет
-       за пределы буфера и не станет «битой». */
-    #define APPEND(...) do { \
-        int _n = snprintf(cmd + o, cmdlen - o, __VA_ARGS__); \
-        if (_n < 0) break; \
-        size_t _need = (size_t)_n; \
-        if (_need >= cmdlen - o) { o = cmdlen - 1; break; } \
-        o += _need; \
-    } while(0)
-
-    APPEND("curl -sS --max-time 25 -X %s -w '\\n%%{http_code}' ", method);
-    if (bearer && *bearer)
-        APPEND("-H 'Authorization: Bearer %s' ", bearer);
-    if (content_type)
-        APPEND("-H 'Content-Type: %s' ", content_type);
-    if (qbody)
-        APPEND("--data-binary %s ", qbody);
-    APPEND("'%s'", url);
-    #undef APPEND
-
-    FILE *fp = popen(cmd, "r");
-    free(cmd);
-    free(qbody);
-    if (!fp) return NULL;
-
-    char *buf = malloc(TRK_BUF);
-    if (!buf) { pclose(fp); return NULL; }
-    size_t total = 0, n;
-    while ((n = fread(buf + total, 1, TRK_BUF - total - 1, fp)) > 0) {
-        total += n;
-        if (total >= TRK_BUF - 1) break;
-    }
-    buf[total] = '\0';
-    pclose(fp);
-
-    /* последняя строка — HTTP-код */
-    char *last = strrchr(buf, '\n');
-    if (last) {
-        if (status) *status = atoi(last + 1);
-        *last = '\0';
-    }
-    return buf;
-}
 
 /* ---------- base64 стандартный (нужен для сверки hash из Telegram initData) ---------- */
 static const char B64STD[] =
@@ -481,8 +409,7 @@ static const char *sa_access_token(void) {
         "&assertion=%s", jwt);
 
     int status = 0;
-    char *resp = trk_curl("POST", turi, "application/x-www-form-urlencoded",
-                          body, NULL, &status);
+    char *resp = http_request_full("POST", turi, "application/x-www-form-urlencoded", body, NULL, &status);
     free(email); free(pkey); free(turi); free(h); free(p); free(sig_b64);
 
     if (!resp || status != 200) {
@@ -634,7 +561,7 @@ static char *sheets_get_values(const char *sheet_name) {
                     enc2, apikey);
                 free(enc2);
                 int st2 = 0;
-                char *r2 = trk_curl("GET", url2, NULL, NULL, NULL, &st2);
+                char *r2 = http_request_full("GET", url2, NULL, NULL, NULL, &st2);
                 if (r2 && st2 == 200) return r2;
                 free(r2);
             }
@@ -653,7 +580,7 @@ static char *sheets_get_values(const char *sheet_name) {
     free(enc_sheet);
 
     int status = 0;
-    char *resp = trk_curl("GET", url, NULL, NULL, token, &status);
+    char *resp = http_request_full("GET", url, NULL, NULL, token, &status);
     if (!resp) return NULL;
     if (status != 200) {
         if (!detect_api_disabled(resp))
@@ -685,7 +612,7 @@ static int sheets_append_row(const char *sheet_name, const char *values_json) {
     snprintf(body, sizeof(body), "{\"values\":[%s]}", values_json);
 
     int status = 0;
-    char *resp = trk_curl("POST", url, "application/json", body, token, &status);
+    char *resp = http_request_full("POST", url, "application/json", body, token, &status);
     if (!resp) return -1;
     if (status != 200) {
         if (!detect_api_disabled(resp))
@@ -719,7 +646,7 @@ static int sheets_update_values_raw(const char *sheet_name, const char *a1_suffi
     free(enc);
 
     int status = 0;
-    char *resp = trk_curl("PUT", url, "application/json", values_object, token, &status);
+    char *resp = http_request_full("PUT", url, "application/json", values_object, token, &status);
     if (!resp) return -1;
     if (status != 200) {
         if (!detect_api_disabled(resp))
@@ -753,7 +680,7 @@ static int sheets_update_range(const char *sheet_name, const char *a1_suffix,
     snprintf(body, sizeof(body), "{\"values\":[%s]}", values_json);
 
     int status = 0;
-    char *resp = trk_curl("PUT", url, "application/json", body, token, &status);
+    char *resp = http_request_full("PUT", url, "application/json", body, token, &status);
     if (!resp) return -1;
     if (status != 200) {
         if (!detect_api_disabled(resp))
@@ -785,7 +712,7 @@ static int sheets_create_sheet(const char *sheet_name) {
     free(esc);
 
     int status = 0;
-    char *resp = trk_curl("POST", url, "application/json", body, token, &status);
+    char *resp = http_request_full("POST", url, "application/json", body, token, &status);
     if (!resp) return -1;
     if (status != 200) {
         /* Вкладка уже существует — это не ошибка */
@@ -1588,7 +1515,7 @@ int tracking_list_months(char ***out, int *count, int max) {
              "%s/v4/spreadsheets/%s?fields=sheets.properties.title",
              g_api_base, g_sheet_id);
     int status = 0;
-    char *resp = trk_curl("GET", url, NULL, NULL, tok, &status);
+    char *resp = http_request_full("GET", url, NULL, NULL, tok, &status);
     if (!resp || status != 200) { free(resp); return -1; }
 
     char **list = calloc((size_t)max, sizeof(char *));
@@ -1771,8 +1698,7 @@ static char *sheets_create_spreadsheet(const char *title) {
     int status = 0;
     char url[512];
     snprintf(url, sizeof(url), "%s/v4/spreadsheets", g_api_base);
-    char *resp = trk_curl("POST", url,
-        "application/json", body, token, &status);
+    char *resp = http_request_full("POST", url, "application/json", body, token, &status);
     if (!resp) return NULL;
     if (status != 200) {
         if (!detect_api_disabled(resp))
@@ -1813,7 +1739,7 @@ static int drive_share(const char *file_id, const char *email, const char *role)
     free(ee);
 
     int status = 0;
-    char *resp = trk_curl("POST", url, "application/json", body, token, &status);
+    char *resp = http_request_full("POST", url, "application/json", body, token, &status);
     if (!resp) return -1;
     if (status != 200 && status != 201) {
         trk_log("drive_share status=%d resp=%.300s", status, resp);
@@ -1833,7 +1759,7 @@ static int sheets_sheet_exists(const char *file_id) {
     snprintf(url, sizeof(url),
         "%s/v4/spreadsheets/%s?fields=spreadsheetId", g_api_base, file_id);
     int status = 0;
-    char *resp = trk_curl("GET", url, NULL, NULL, token, &status);
+    char *resp = http_request_full("GET", url, NULL, NULL, token, &status);
     if (!resp) return 0;
     int ok = (status == 200);
     if (!ok) detect_api_disabled(resp);
@@ -1956,7 +1882,7 @@ static void api_tracking_diag(int fd, const char *query) {
         snprintf(url, sizeof(url), "%s/v4/spreadsheets/%s?fields=sheets.properties.title",
                  g_api_base, g_sheet_id);
         int status = 0;
-        char *resp = trk_curl("GET", url, NULL, NULL, tok, &status);
+        char *resp = http_request_full("GET", url, NULL, NULL, tok, &status);
         APPEND(",\"tabs\":[");
         if (resp && status == 200) {
             const char *p = resp;

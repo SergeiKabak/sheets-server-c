@@ -19,6 +19,7 @@
 #include <stdarg.h>
 
 #include "tracking.h"
+#include "http.h"
 
 #define CACHE_TTL 60
 #define BUFFER_SIZE (512 * 1024)
@@ -47,48 +48,6 @@ static void init_config(void) {
     MINIAPP_URL    = getenv("MINIAPP_URL");
 }
 
-/* ================================================================
- * curl через popen — загрузка URL в память
- * ================================================================ */
-static char *fetch_url(const char *url) {
-    char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "curl -sS --max-time 20 '%s' 2>&1", url);
-
-    FILE *fp = popen(cmd, "r");
-    if (!fp) { fprintf(stderr, "[diag] popen failed\n"); return NULL; }
-
-    char *buf = malloc(BUFFER_SIZE);
-    if (!buf) { pclose(fp); return NULL; }
-
-    size_t total = 0;
-    size_t n;
-    while ((n = fread(buf + total, 1, BUFFER_SIZE - total - 1, fp)) > 0) {
-        total += n;
-        if (total >= BUFFER_SIZE - 1) break;
-    }
-    buf[total] = '\0';
-
-    int status = pclose(fp);
-    if (status != 0) fprintf(stderr, "[diag] curl status=%d url=%s\n", status, url);
-    if (status != 0 || total == 0) {
-        if (total > 0) fprintf(stderr, "[diag] curl output: %.200s\n", buf);
-        free(buf);
-        return NULL;
-    }
-    return buf;
-}
-
-/* Запускает произвольную curl-команду, возвращает 0 при успехе (curl exit 0) */
-static int run_curl(const char *cmd) {
-    int status;
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return -1;
-    char sink[256];
-    while (fgets(sink, sizeof(sink), fp) != NULL) {}
-    status = pclose(fp);
-    if (status == -1) return -1;
-    return WEXITSTATUS(status);
-}
 
 /* ================================================================
  * Утилиты для ручного разбора JSON по ключам (Google Sheets)
@@ -131,22 +90,6 @@ static int is_true(const char *pos) {
     return (pos && strncmp(pos, "true", 4) == 0);
 }
 
-static char *url_encode(const char *src) {
-    size_t len = strlen(src);
-    char *dst = malloc(len * 3 + 1);
-    if (!dst) return NULL;
-    char *d = dst;
-    for (const unsigned char *s = (const unsigned char *)src; *s; s++) {
-        if ((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') ||
-            (*s >= '0' && *s <= '9') || *s == '-' || *s == '_' || *s == '.' || *s == '~') {
-            *d++ = *s;
-        } else {
-            d += sprintf(d, "%%%02X", *s);
-        }
-    }
-    *d = '\0';
-    return dst;
-}
 
 /* ================================================================
  * Google Sheets: список видимых листов
@@ -158,7 +101,8 @@ static int get_visible_sheets(char sheets[][MAX_SHEET_NAME], int max_sheets) {
         "?fields=sheets.properties(sheetId,title,hidden)&key=%s",
         SPREADSHEET_ID, GOOGLE_API_KEY);
 
-    char *response = fetch_url(url);
+        int http_status = 0;
+    char *response = http_get(url, &http_status);
     if (!response) { fprintf(stderr, "[diag] google metadata fetch failed (curl/newtwork)\n"); return 0; }
 
     int count = 0;
@@ -369,7 +313,8 @@ static int build_months(MonthEntry *out, int max, FILE *idx) {
             SPREADSHEET_ID, encoded_range, GOOGLE_API_KEY);
         free(encoded_range);
 
-        char *response = fetch_url(url);
+            int http_status = 0;
+    char *response = http_get(url, &http_status);
         if (!response) continue;
 
         const char *values_pos = strstr(response, "\"values\"");
@@ -674,13 +619,13 @@ static char *json_escape(const char *s) {
 static void set_chat_menu_button(void);
 
 static void tg_send_text(long long chat_id, const char *text) {
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd),
-        "curl -sS --max-time 20 --data-urlencode 'chat_id=%lld' "
-        "--data-urlencode 'text=%s' "
-        "https://api.telegram.org/bot%s/sendMessage",
-        chat_id, text, BOT_TOKEN);
-    run_curl(cmd);
+    char url[512];
+    char *enc_text = url_encode(text);
+    char post[4096];
+    snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/sendMessage", BOT_TOKEN);
+    snprintf(post, sizeof(post), "chat_id=%lld&text=%s", chat_id, enc_text ? enc_text : text);
+    free(enc_text);
+    http_post_form(url, post);
 }
 
 /* Клавиатура учёта времени (Пришла / Ушла / Деньги) в JSON-виде. */
@@ -689,14 +634,17 @@ static void tg_send_text(long long chat_id, const char *text) {
 /* Отправляет текст вместе с клавиатурой — так клавиатура всегда остаётся
    на экране, даже если пользователь её раньше скрыл. */
 static void tg_send_text_kb(long long chat_id, const char *text) {
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd),
-        "curl -sS --max-time 20 --data-urlencode 'chat_id=%lld' "
-        "--data-urlencode 'text=%s' "
-        "--data-urlencode 'reply_markup=" TRACK_KEYBOARD_JSON "' "
-        "https://api.telegram.org/bot%s/sendMessage",
-        chat_id, text, BOT_TOKEN);
-    run_curl(cmd);
+    char url[512];
+    char *enc_text = url_encode(text);
+    char *enc_markup = url_encode(TRACK_KEYBOARD_JSON);
+    char post[8192];
+    snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/sendMessage", BOT_TOKEN);
+    snprintf(post, sizeof(post), "chat_id=%lld&text=%s&reply_markup=%s",
+        chat_id, enc_text ? enc_text : text,
+        enc_markup ? enc_markup : TRACK_KEYBOARD_JSON);
+    free(enc_text);
+    free(enc_markup);
+    http_post_form(url, post);
 }
 
 /* Подтверждает нажатие на inline-кнопку.
@@ -704,22 +652,19 @@ static void tg_send_text_kb(long long chat_id, const char *text) {
    text передаётся как POST-параметр с --data-urlencode (корректный URL-кодинг). */
 static void tg_answer(const char *cq_id, const char *text) {
     if (!cq_id || !*cq_id) return;
-    char cmd[4096];
-    if (text && *text) {
-        snprintf(cmd, sizeof(cmd),
-            "curl -sS --max-time 20 -X POST "
-            "--data-urlencode 'callback_query_id=%s' "
-            "--data-urlencode 'text=%s' "
-            "https://api.telegram.org/bot%s/answerCallbackQuery",
-            cq_id, text, BOT_TOKEN);
+    char url[512];
+    char *enc_cq = url_encode(cq_id);
+    char *enc_text = text ? url_encode(text) : NULL;
+    char post[2048];
+    snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/answerCallbackQuery", BOT_TOKEN);
+    if (enc_text) {
+        snprintf(post, sizeof(post), "callback_query_id=%s&text=%s", enc_cq, enc_text);
+        free(enc_text);
     } else {
-        snprintf(cmd, sizeof(cmd),
-            "curl -sS --max-time 20 -X POST "
-            "--data-urlencode 'callback_query_id=%s' "
-            "https://api.telegram.org/bot%s/answerCallbackQuery",
-            cq_id, BOT_TOKEN);
+        snprintf(post, sizeof(post), "callback_query_id=%s", enc_cq);
     }
-    run_curl(cmd);
+    free(enc_cq);
+    http_post_form(url, post);
 }
 
 
@@ -763,44 +708,35 @@ static const char HELP_MSG[] =
 
 /* Отправляет сообщение с кнопками «Пришла»/«Ушла» (reply-клавиатура). */
 static void tg_send_track_menu(long long chat_id) {
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd),
-        "curl -sS --max-time 20 "
-        "--data-urlencode 'chat_id=%lld' "
-        "--data-urlencode 'text=%s' "
-        "--data-urlencode 'reply_markup={\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"},{\"text\":\"Деньги\"}]],\"resize_keyboard\":true,\"is_persistent\":true}' "
-        "https://api.telegram.org/bot%s/sendMessage",
-        chat_id, "Отметьте рабочее время:", BOT_TOKEN);
-    run_curl(cmd);
+    char url[512];
+    char *enc_text = url_encode("Отметьте рабочее время:");
+    char *enc_markup = url_encode(TRACK_KEYBOARD_JSON);
+    char post[8192];
+    snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/sendMessage", BOT_TOKEN);
+    snprintf(post, sizeof(post), "chat_id=%lld&text=%s&reply_markup=%s",
+        chat_id, enc_text ? enc_text : "Отметьте рабочее время:",
+        enc_markup ? enc_markup : TRACK_KEYBOARD_JSON);
+    free(enc_text);
+    free(enc_markup);
+    http_post_form(url, post);
 }
-
-/* Отправляет сообщение с inline-кнопками (под сообщением). */
 static void tg_send_track_inline(long long chat_id) {
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd),
-        "curl -sS --max-time 20 "
-        "--data-urlencode 'chat_id=%lld' "
-        "--data-urlencode 'text=%s' "
-        "--data-urlencode 'reply_markup={\"inline_keyboard\":[[{\"text\":\"Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"Ушла\",\"callback_data\":\"trk_out\"}],{\"text\":\"Деньги\",\"callback_data\":\"trk_money\"}]]}' "
-        "https://api.telegram.org/bot%s/sendMessage",
-        chat_id, "Отметьте рабочее время:", BOT_TOKEN);
-    run_curl(cmd);
+    char url[512];
+    char *enc_text = url_encode("Отметьте рабочее время:");
+    char *enc_markup = url_encode("{\"inline_keyboard\":[[{\"text\":\"Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"Ушла\",\"callback_data\":\"trk_out\"}],{\"text\":\"Деньги\",\"callback_data\":\"trk_money\"}]}");
+    char post[8192];
+    snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/sendMessage", BOT_TOKEN);
+    snprintf(post, sizeof(post), "chat_id=%lld&text=%s&reply_markup=%s",
+        chat_id, enc_text ? enc_text : "Отметьте рабочее время:",
+        enc_markup ? enc_markup : "{\"inline_keyboard\":[[{\"text\":\"Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"Ушла\",\"callback_data\":\"trk_out\"}],{\"text\":\"Деньги\",\"callback_data\":\"trk_money\"}]}");
+    free(enc_text);
+    free(enc_markup);
+    http_post_form(url, post);
 }
 
-/* Показывает кнопки с месяцами: по нажатию — сумма заработка за месяц. */
 static void tg_send_money_menu(long long chat_id) {
     char **months = NULL;
     int count = 0;
-    if (tracking_list_months(&months, &count, 24) != 0 || count == 0) {
-        if (months) {
-            for (int i = 0; i < count; i++) free(months[i]);
-            free(months);
-        }
-        tg_send_text(chat_id, "Не удалось получить список месяцев. Проверьте доступ к таблице.");
-        return;
-    }
-
-    /* Собираем inline-клавиатуру: по 3 месяца в ряд */
     char kb[4096];
     size_t o = 0;
     int in_row = 0;
@@ -823,15 +759,17 @@ static void tg_send_money_menu(long long chat_id) {
     }
     snprintf(kb + o, sizeof(kb) - o, "]]}");
 
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd),
-        "curl -sS --max-time 20 "
-        "--data-urlencode 'chat_id=%lld' "
-        "--data-urlencode 'text=%s' "
-        "--data-urlencode 'reply_markup=%s' "
-        "https://api.telegram.org/bot%s/sendMessage",
-        chat_id, "Заработок по месяцам — выберите месяц:", kb, BOT_TOKEN);
-    run_curl(cmd);
+    char url[512];
+    char *enc_text = url_encode("Заработок по месяцам — выберите месяц:");
+    char *enc_markup = url_encode(kb);
+    char post[8192];
+    snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/sendMessage", BOT_TOKEN);
+    snprintf(post, sizeof(post), "chat_id=%lld&text=%s&reply_markup=%s",
+        chat_id, enc_text ? enc_text : "Заработок по месяцам — выберите месяц:",
+        enc_markup ? enc_markup : kb);
+    free(enc_text);
+    free(enc_markup);
+    http_post_form(url, post);
 
     for (int i = 0; i < count; i++) free(months[i]);
     free(months);
@@ -1352,25 +1290,25 @@ static void api_cabinet(int fd, const char *query) {
 static void set_chat_menu_button(void) {
     if (!MINIAPP_URL || !*MINIAPP_URL) return;
     char *eu = json_escape(MINIAPP_URL);
-    char cmd[8192];
-    snprintf(cmd, sizeof(cmd),
-        "curl -sS --max-time 20 -X POST "
-        "-H 'Content-Type: application/json' "
-        "-d '{\"menu_button\":{\"type\":\"web_app\",\"text\":\"График\",\"web_app\":{\"url\":\"%s\"}}}' "
-        "https://api.telegram.org/bot%s/setChatMenuButton",
-        eu, BOT_TOKEN);
-    run_curl(cmd);
+    char json[8192];
+    char url[512];
+    snprintf(json, sizeof(json),
+        "{\"menu_button\":{\"type\":\"web_app\",\"text\":\"График\",\"web_app\":{\"url\":\"%s\"}}}", eu);
+    snprintf(url, sizeof(url), "https://api.telegram.org/bot%s/setChatMenuButton", BOT_TOKEN);
+    int code = http_post_json(url, json);
     free(eu);
+    (void)code;
 }
 
 /* Диагностика: пробуем достучаться до Google Sheets и отдаём голову ответа */
 static char *diag_google(void) {
+    int status = 0;
     char url[1024];
     snprintf(url, sizeof(url),
         "https://sheets.googleapis.com/v4/spreadsheets/%s"
         "?fields=sheets.properties(title,hidden)&key=%s",
         SPREADSHEET_ID ? SPREADSHEET_ID : "", GOOGLE_API_KEY ? GOOGLE_API_KEY : "");
-    return fetch_url(url);
+    return http_get(url, &status);
 }
 
 static int handle_conn(int client_fd) {

@@ -5,13 +5,13 @@ WORKDIR /build
 
 COPY . .
 
-RUN gcc -O2 -Wall -Wextra -o server_app main.c tracking.c cJSON.c
+RUN gcc -O2 -Wall -Wextra -o server_app main.c tracking.c cJSON.c http.c -l:libcurl.so.4
 
 # --- ЭТАП 2: Финальный запуск ---
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl openssl && \
+        ca-certificates curl openssl libcurl4 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
