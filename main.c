@@ -740,6 +740,11 @@ static void tg_send_money_menu(long long chat_id) {
     char kb[4096];
     size_t o = 0;
     int in_row = 0;
+
+    if (tracking_list_months(&months, &count, 24) != 0 || count == 0) {
+        tg_send_text(chat_id, "Не удалось получить список месяцев. Проверьте доступ к таблице.");
+        return;
+    }
     o += (size_t)snprintf(kb + o, sizeof(kb) - o, "{\"inline_keyboard\":[[");
     for (int i = 0; i < count && o < sizeof(kb) - 256; i++) {
         char label[64];
