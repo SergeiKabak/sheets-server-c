@@ -1370,10 +1370,21 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
         double rate = atof_comm(rows.row[date_row].cell[4]);
         snprintf(sum_buf, sizeof(sum_buf), "%.2f", hours * rate);
 
-        free(rows.row[date_row].cell[3]);
-        rows.row[date_row].cell[3] = strdup(hours_buf);
-        free(rows.row[date_row].cell[5]);
-        rows.row[date_row].cell[5] = strdup(sum_buf);
+        /* Формулы вместо статичных значений: */
+        /* D = C - B (уход минус приход) */
+        {
+            char formula[64];
+            snprintf(formula, sizeof(formula), "=C%d-B%d", date_row + 1, date_row + 1);
+            free(rows.row[date_row].cell[3]);
+            rows.row[date_row].cell[3] = strdup(formula);
+        }
+        /* F = D * E (часы × ставка) */
+        {
+            char formula[64];
+            snprintf(formula, sizeof(formula), "=D%d*E%d", date_row + 1, date_row + 1);
+            free(rows.row[date_row].cell[5]);
+            rows.row[date_row].cell[5] = strdup(formula);
+        }
         if (cell_empty(rows.row[date_row].cell[4])) {
             char rb[32];
             snprintf(rb, sizeof(rb), "%.2f", rate);
