@@ -1368,7 +1368,10 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
         char hours_buf[32], sum_buf[32];
         snprintf(hours_buf, sizeof(hours_buf), "%.2f", hours);
         double rate = atof_comm(rows.row[date_row].cell[4]);
-        snprintf(sum_buf, sizeof(sum_buf), "%.2f", hours * rate);
+        /* Считаем сумму из тех же округлённых часов, что показываем пользователю,
+           чтобы не было расхождения (например, 5.02 × 14.2 = 71.28, а не 71.24). */
+        double hours_val = atof_comm(hours_buf);
+        snprintf(sum_buf, sizeof(sum_buf), "%.2f", hours_val * rate);
 
         /* Статичные значения вместо формул: */
         /* D = часы (уход минус приход) */
