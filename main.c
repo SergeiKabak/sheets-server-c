@@ -1245,7 +1245,7 @@ static void serve_miniapp(int fd) {
         "<div class='row'><button id='trk-modal-save' class='save'>Сохранить</button>"
         "<button id='trk-modal-cancel' class='cancel'>Отмена</button></div>"
         "</div></div>"
-        "</div></body></html>";
+        "</body></html>";
 
     char header[256];
     int hlen = snprintf(header, sizeof(header),
