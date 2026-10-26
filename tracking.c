@@ -1912,6 +1912,57 @@ fill_finish:
     return code;
 }
 
+/* Гарантирует, что вкладка месяца существует и содержит строку заголовков.
+   Нужна для диагностики/ручного создания месяца (например, "09.2026"). */
+int tracking_ensure_month(const char *month, char *out, size_t cap) {
+    if (!out || cap < 128) return 500;
+    out[0] = '\0';
+
+    tracking_ensure_init();
+    if (!g_sheet_id && tracking_ensure_spreadsheet() != 0) {
+        char *e = json_escape_local(g_last_error[0] ? g_last_error
+                                    : "нет доступа к таблице");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "");
+        free(e);
+        return 500;
+    }
+
+    char tab[64];
+    int pmon = 0, pyear = 0;
+    if (month_sheet_and_parts(month, tab, sizeof(tab), &pmon, &pyear) != 0) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный месяц\"}");
+        return 400;
+    }
+
+    TRows rows;
+    memset(&rows, 0, sizeof(rows));
+    int code = 200;
+    if (load_or_create_month_sheet(tab, &rows) != 0) {
+        char *e = json_escape_local(g_last_error[0] ? g_last_error
+                                    : "не удалось создать вкладку месяца");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "");
+        free(e);
+        code = 500;
+        goto ensure_finish;
+    }
+    if (sheets_write_rows(tab, &rows) != 0) {
+        char *e = json_escape_local(g_last_error[0] ? g_last_error
+                                    : "не удалось записать заголовки вкладки");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "");
+        free(e);
+        code = 500;
+        goto ensure_finish;
+    }
+
+    snprintf(out, cap, "{\"ok\":true,\"month\":\"%s\",\"rows\":%d}", tab, rows.count);
+    trk_log("ENSURE MONTH: %s rows=%d", tab, rows.count);
+    trk_cache_invalidate(tab);
+
+ensure_finish:
+    trows_free(&rows);
+    return code;
+}
+
 /* HTTP-обёртка над tracking_do_clock */
 
 static void api_tracking_clock(int fd, const char *query, const char *body) {
@@ -1956,6 +2007,19 @@ static void api_tracking_fill(int fd, const char *query) {
                        : "500 Internal Server Error";
     trk_reply(fd, status, out);
     free(month); free(day_s); free(in_s); free(out_s);
+}
+
+/* GET /diag/tracking/ensure?month=Сентябрь 2026
+   Создаёт отсутствующую вкладку месяца и пишет заголовки. */
+static void api_tracking_ensure(int fd, const char *query) {
+    char *month = query_param(query, "month");
+    char out[2048];
+    int code = tracking_ensure_month(month, out, sizeof(out));
+    const char *status = (code == 200) ? "200 OK"
+                       : (code == 400) ? "400 Bad Request"
+                       : "500 Internal Server Error";
+    trk_reply(fd, status, out);
+    free(month);
 }
 
 /* GET /api/tracking/summary?month=...&name=... — сводка по сотруднику */
@@ -2215,6 +2279,10 @@ void tracking_handle(int fd, const char *method, const char *path, const char *b
     }
     if (strcmp(path, "/api/tracking/months") == 0) {
         api_tracking_months(fd);
+        return;
+    }
+    if (strncmp(path, "/diag/tracking/ensure", 21) == 0) {
+        api_tracking_ensure(fd, path);
         return;
     }
     if (strcmp(path, "/diag/tracking") == 0) {

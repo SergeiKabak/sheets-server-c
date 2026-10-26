@@ -60,6 +60,10 @@ int tracking_cache_refresh(const char *const *months, int count);
 int tracking_fill_day(const char *month, int day, const char *in_time,
                       const char *out_time, char *out, size_t cap);
 
+/* Создаёт вкладку месяца (MM.YYYY) и записывает в неё заголовки.
+   Используется для диагностики/ручного создания отсутствующего месяца. */
+int tracking_ensure_month(const char *month, char *out, size_t cap);
+
 /* Выполняет отметку прихода/ухода программно (используется Telegram-ботом).
    action: "in" или "out". Возвращает HTTP-код (200/400/409/500),
    в out пишет JSON-ответ. */

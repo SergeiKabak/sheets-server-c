@@ -262,6 +262,15 @@ int main(int argc, char **argv) {
     check(access("/tmp/trk_days_10.2025.json", R_OK) != 0,
           "fill: пустой кэш 10.2025 сброшен");
 
+    /* Диагностическое создание вкладки без записи дня. */
+    code = tracking_ensure_month("Октябрь 2024", out, sizeof(out));
+    printf("ensure month: %d %s\n", code, out);
+    check(code == 200 && strstr(out, "\"month\":\"10.2024\"") != NULL,
+          "ensure: вкладка месяца создана");
+    check(created_has("10.2024"), "ensure: имя вкладки 10.2024");
+    check(g_last_put && strstr(g_last_put, "\"Дата\",\"Время прихода\",\"Время ухода\""),
+          "ensure: заголовки записаны");
+
     char *p1 = query_param("/api/tracking/fill?month=10.2026&day=5&in=07:30&out=14:40", "in");
     char *p2 = query_param("/api/tracking/fill?month=10.2026&day=5&min=bad", "in");
     check(p1 && strcmp(p1, "07:30") == 0, "query: параметр in найден");
