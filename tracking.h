@@ -36,6 +36,22 @@ int tracking_list_months(char ***out, int *count, int max);
 /* Итог за месяц (вкладка вида "10.2026"): часы, сумма, число дней. */
 int tracking_month_total(const char *month, double *hours, double *sum, int *days);
 
+/* Отметки времени за месяц графика (например "Октябрь 2026" или "10.2026").
+   Возвращает HTTP-код (200/400/500), в out пишет JSON:
+   {"ok":true,"month":"10.2026","label":"Октябрь 2026",
+    "today":"26.10.2026","days":{"5":{"in":"07:30","out":"14:40",
+    "hours":"7.17","sum":"3585.00"}}}
+   Нужен Mini App, чтобы показать "+" только там, где время ещё не внесено. */
+int tracking_days_json(const char *month, char *out, size_t cap);
+
+/* Заполняет отработанное время за произвольный день месяца графика.
+   month — "Октябрь 2026" или "10.2026", day — 1..31,
+   in_time / out_time — "ЧЧ:ММ" (например "07:30").
+   Создаёт вкладку месяца при необходимости и добавляет строку сотрудника.
+   Возвращает HTTP-код (200/400/409/500), в out пишет JSON-ответ. */
+int tracking_fill_day(const char *month, int day, const char *in_time,
+                      const char *out_time, char *out, size_t cap);
+
 /* Выполняет отметку прихода/ухода программно (используется Telegram-ботом).
    action: "in" или "out". Возвращает HTTP-код (200/400/409/500),
    в out пишет JSON-ответ. */

@@ -256,6 +256,23 @@ static char *json_escape_local(const char *s) {
     return out;
 }
 
+/* Добавляет форматированный фрагмент в буфер (для сборки JSON).
+   Возвращает 0 при успехе, -1 если данные не поместились. */
+static int trk_append(char *buf, size_t cap, size_t *off, const char *fmt, ...) {
+    if (!buf || !off || !fmt || *off >= cap) return -1;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *off, cap - *off, fmt, ap);
+    va_end(ap);
+    if (n < 0) return -1;
+    if ((size_t)n >= cap - *off) {
+        *off = cap - 1;
+        return -1;
+    }
+    *off += (size_t)n;
+    return 0;
+}
+
 /* ---------- HTTP-запрос через curl ---------- */
 /* Возвращает тело ответа; *status — HTTP-код (0 при ошибке). */
 
@@ -457,9 +474,10 @@ static void current_month_name(char *out, size_t cap) {
 }
 
 /* Имя вкладки по названию месяца (например "Октябрь 2026" -> "10.2026") —
-   для совместимости со старыми вкладками. */
+   для совместимости со старыми вкладками. Если год не указан, берём текущий. */
 static void month_name_to_numeric(const char *month, char *out, size_t cap) {
     out[0] = '\0';
+    if (!month) return;
     for (int i = 0; i < 12; i++) {
         const char *m = MONTH_NAMES[i];
         size_t len = strlen(m);
@@ -467,8 +485,14 @@ static void month_name_to_numeric(const char *month, char *out, size_t cap) {
             const char *rest = month + len;
             while (*rest == ' ') rest++;
             int year = 0;
-            if (sscanf(rest, "%d", &year) == 1)
+            if (sscanf(rest, "%d", &year) == 1) {
                 snprintf(out, cap, "%02d.%04d", i + 1, year);
+            } else {
+                time_t now = time(NULL) + g_tz_offset;
+                struct tm tm;
+                gmtime_r(&now, &tm);
+                snprintf(out, cap, "%02d.%04d", i + 1, tm.tm_year + 1900);
+            }
             return;
         }
     }
@@ -482,17 +506,25 @@ static void current_datetime(char *date, size_t dcap, char *time_s, size_t tcap)
     struct tm tm;
     gmtime_r(&now, &tm);
     snprintf(date, dcap, "%02d.%02d.%d", tm.tm_mday, tm.tm_mon + 1, tm.tm_year + 1900);
-    snprintf(time_s, tcap, "%02d:%02d", tm.tm_hour, tm.tm_min);
+    if (time_s && tcap)
+        snprintf(time_s, tcap, "%02d:%02d", tm.tm_hour, tm.tm_min);
 }
 
-/* Значение поля из query-строки (после "name=") */
+/* Значение поля из query-строки. Ищем только целое имя параметра,
+   чтобы "in=" не находился внутри "min=" или "cabinet=". */
 static char *query_param(const char *query, const char *name) {
-    if (!query) return NULL;
+    if (!query || !name || !*name) return NULL;
     char pat[128];
     snprintf(pat, sizeof(pat), "%s=", name);
-    const char *p = strstr(query, pat);
-    if (!p) return NULL;
-    p += strlen(pat);
+    size_t plen = strlen(pat);
+    const char *p = query;
+    for (;;) {
+        p = strstr(p, pat);
+        if (!p) return NULL;
+        if (p == query || p[-1] == '&' || p[-1] == '?') break;
+        p += plen;
+    }
+    p += plen;
     const char *end = strchr(p, '&');
     size_t len = end ? (size_t)(end - p) : strlen(p);
     char *raw = malloc(len + 1);
@@ -1033,6 +1065,31 @@ static void normalize_date(const char *in, char *out, size_t cap) {
     }
 }
 
+/* Число дней в месяце (month — 1..12). */
+static int days_in_month(int month, int year) {
+    static const int dm[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (month < 1 || month > 12) return 0;
+    if (month == 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0))
+        return 29;
+    return dm[month - 1];
+}
+
+/* Преобразует "Октябрь 2026" / "10.2026" в имя вкладки "10.2026".
+   Возвращает 0 при успехе. */
+static int month_sheet_and_parts(const char *month, char *tab, size_t tabcap,
+                                 int *pmon, int *pyear) {
+    if (!month || !*month) return -1;
+    char numeric[64];
+    month_name_to_numeric(month, numeric, sizeof(numeric));
+    int mon = 0, year = 0;
+    if (sscanf(numeric, "%d.%d", &mon, &year) != 2) return -1;
+    if (mon < 1 || mon > 12 || year < 2000 || year > 2100) return -1;
+    snprintf(tab, tabcap, "%02d.%04d", mon, year);
+    if (pmon) *pmon = mon;
+    if (pyear) *pyear = year;
+    return 0;
+}
+
 /* ==================================================================
  *  Основная логика: Пришла / Ушла
  * ================================================================== */
@@ -1412,7 +1469,285 @@ finish:
     return code;
 }
 
+/* ==================================================================
+ *  Заполнение ранее отработанного времени (из графика смен)
+ * ================================================================== */
+
+/* GET /api/tracking/days?month=Октябрь 2026
+   Отдаёт уже внесённые дни месяца, чтобы Mini App показал "+" только там,
+   где время ещё не отмечено. */
+int tracking_days_json(const char *month, char *out, size_t cap) {
+    if (!out || cap < 128) return 500;
+    out[0] = '\0';
+
+    tracking_ensure_init();
+    if (!g_sheet_id && tracking_ensure_spreadsheet() != 0) {
+        char *e = json_escape_local(g_last_error[0] ? g_last_error
+                                    : "нет доступа к таблице");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "");
+        free(e);
+        return 500;
+    }
+
+    char tab[64];
+    int pmon = 0, pyear = 0;
+    if (month_sheet_and_parts(month, tab, sizeof(tab), &pmon, &pyear) != 0) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный месяц\"}");
+        return 400;
+    }
+
+    TRows rows;
+    memset(&rows, 0, sizeof(rows));
+    char *resp = sheets_get_values(tab);
+    if (resp) {
+        parse_values_json(resp, &rows);
+        free(resp);
+    }
+
+    char today[32];
+    current_datetime(today, sizeof(today), NULL, 0);
+
+    const char *sn = getenv("SEARCH_NAME");
+    char *name = (sn && *sn) ? strdup(sn) : NULL;
+    int block = name ? find_employee_block(&rows, name) : -1;
+
+    char label[128];
+    tracking_month_label(tab, label, sizeof(label));
+    char *em = json_escape_local(tab);
+    char *el = json_escape_local(label);
+
+    size_t o = 0;
+    if (trk_append(out, cap, &o,
+                   "{\"ok\":true,\"month\":\"%s\",\"label\":\"%s\","
+                   "\"today\":\"%s\",\"days\":{",
+                   em ? em : "", el ? el : "", today) != 0) {
+        free(em); free(el); free(name);
+        trows_free(&rows);
+        return 500;
+    }
+    free(em); free(el);
+
+    int first = 1;
+    if (block >= 0) {
+        for (int i = block + 1; i < rows.count; i++) {
+            if (row_is_empty(&rows.row[i])) break;
+            const char *a = rows.row[i].cell[0];
+            if (cell_empty(a)) continue;
+
+            char nd[64];
+            normalize_date(a, nd, sizeof(nd));
+            int dd = 0, mm = 0, yy = 0;
+            if (sscanf(nd, "%d.%d.%d", &dd, &mm, &yy) != 3) continue;
+            if (mm != pmon || yy != pyear) continue;
+            if (dd < 1 || dd > days_in_month(pmon, pyear)) continue;
+
+            const char *tin   = rows.row[i].cell[1];
+            const char *tout  = rows.row[i].cell[2];
+            const char *hours = rows.row[i].cell[3];
+            const char *sum   = rows.row[i].cell[5];
+            if (cell_empty(tin) && cell_empty(tout) &&
+                cell_empty(hours) && cell_empty(sum)) continue;
+
+            char *ei = json_escape_local(tin   ? tin   : "");
+            char *eo = json_escape_local(tout  ? tout  : "");
+            char *eh = json_escape_local(hours ? hours : "");
+            char *es = json_escape_local(sum   ? sum   : "");
+            int rc = trk_append(out, cap, &o,
+                "%s\"%d\":{\"in\":\"%s\",\"out\":\"%s\","
+                "\"hours\":\"%s\",\"sum\":\"%s\"}",
+                first ? "" : ",", dd,
+                ei ? ei : "", eo ? eo : "", eh ? eh : "", es ? es : "");
+            free(ei); free(eo); free(eh); free(es);
+            if (rc != 0) break;
+            first = 0;
+        }
+    }
+    if (trk_append(out, cap, &o, "}}") != 0) {
+        free(name);
+        trows_free(&rows);
+        return 500;
+    }
+
+    free(name);
+    trows_free(&rows);
+    return 200;
+}
+
+/* POST /api/tracking/fill?month=...&day=...&in=...&out=...
+   Добавляет (или дополняет) строку за указанный день в вкладку месяца.
+   Если вкладки месяца ещё нет — создаёт её. */
+int tracking_fill_day(const char *month, int day, const char *in_time,
+                      const char *out_time, char *out, size_t cap) {
+    if (!out || cap < 128) return 500;
+    out[0] = '\0';
+
+    tracking_ensure_init();
+    if (!g_sheet_id && tracking_ensure_spreadsheet() != 0) {
+        char *e = json_escape_local(g_last_error[0] ? g_last_error
+                                    : "нет доступа к таблице");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "");
+        free(e);
+        return 500;
+    }
+
+    char tab[64];
+    int pmon = 0, pyear = 0;
+    if (month_sheet_and_parts(month, tab, sizeof(tab), &pmon, &pyear) != 0) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный месяц\"}");
+        return 400;
+    }
+    if (day < 1 || day > days_in_month(pmon, pyear)) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный день месяца\"}");
+        return 400;
+    }
+    if (!in_time || !*in_time || !out_time || !*out_time) {
+        snprintf(out, cap,
+                 "{\"ok\":false,\"error\":\"укажите время прихода и ухода\"}");
+        return 400;
+    }
+
+    char norm_in[16], norm_out[16];
+    normalize_time(in_time, norm_in, sizeof(norm_in));
+    normalize_time(out_time, norm_out, sizeof(norm_out));
+    int in_min  = parse_hhmm(norm_in);
+    int out_min = parse_hhmm(norm_out);
+    if (in_min < 0 || out_min < 0) {
+        snprintf(out, cap,
+                 "{\"ok\":false,\"error\":\"неверное время, нужно ЧЧ:ММ\"}");
+        return 400;
+    }
+
+    char date[32];
+    snprintf(date, sizeof(date), "%02d.%02d.%04d", day, pmon, pyear);
+
+    /* Не даём отметить будущие дни: в таблице учитывается только
+       уже отработанное время. */
+    char today[32];
+    current_datetime(today, sizeof(today), NULL, 0);
+    int td = 0, tm = 0, ty = 0;
+    if (sscanf(today, "%d.%d.%d", &td, &tm, &ty) == 3) {
+        int future = (pyear > ty) ||
+                     (pyear == ty && pmon > tm) ||
+                     (pyear == ty && pmon == tm && day > td);
+        if (future) {
+            snprintf(out, cap,
+                     "{\"ok\":false,\"error\":\"нельзя отметить будущую дату\"}");
+            return 400;
+        }
+    }
+
+    const char *sn = getenv("SEARCH_NAME");
+    char *name = (sn && *sn) ? strdup(sn) : strdup("Сотрудник");
+    TRows rows;
+    memset(&rows, 0, sizeof(rows));
+    int code = 200;
+
+    if (!name) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"не указано имя сотрудника\"}");
+        return 500;
+    }
+
+    if (load_or_create_month_sheet(tab, &rows) != 0) {
+        char *e = json_escape_local(g_last_error[0] ? g_last_error
+                                    : "не удалось открыть вкладку месяца");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "");
+        free(e);
+        code = 500;
+        goto fill_finish;
+    }
+
+    int block = find_employee_block(&rows, name);
+    int row = (block >= 0) ? find_date_row(&rows, block, date) : -1;
+
+    if (row >= 0 &&
+        !cell_empty(rows.row[row].cell[1]) &&
+        !cell_empty(rows.row[row].cell[2])) {
+        char *ei = json_escape_local(rows.row[row].cell[1]);
+        char *eo = json_escape_local(rows.row[row].cell[2]);
+        snprintf(out, cap,
+                 "{\"ok\":false,\"error\":\"время за этот день уже отмечено\","
+                 "\"date\":\"%s\",\"in\":\"%s\",\"out\":\"%s\"}",
+                 date, ei ? ei : "", eo ? eo : "");
+        free(ei); free(eo);
+        code = 409;
+        goto fill_finish;
+    }
+
+    if (row < 0) {
+        if (block >= 0) {
+            int last = find_block_end(&rows, block);
+            trows_insert(&rows, last + 1);
+            row = last + 1;
+        } else {
+            /* Пустая строка-разделитель, затем строка с ФИО, затем день. */
+            trows_insert(&rows, rows.count);
+            trows_insert(&rows, rows.count);
+            int ni = rows.count - 1;
+            free(rows.row[ni].cell[0]);
+            rows.row[ni].cell[0] = strdup(name);
+
+            trows_insert(&rows, rows.count);
+            row = rows.count - 1;
+        }
+        free(rows.row[row].cell[0]);
+        rows.row[row].cell[0] = strdup(date);
+    }
+
+    free(rows.row[row].cell[1]);
+    rows.row[row].cell[1] = strdup(norm_in);
+    free(rows.row[row].cell[2]);
+    rows.row[row].cell[2] = strdup(norm_out);
+
+    char rate_buf[32];
+    if (cell_empty(rows.row[row].cell[4])) {
+        double rate = employee_rate_by_name(name);
+        snprintf(rate_buf, sizeof(rate_buf), "%.2f", rate);
+        free(rows.row[row].cell[4]);
+        rows.row[row].cell[4] = strdup(rate_buf);
+    } else {
+        snprintf(rate_buf, sizeof(rate_buf), "%s", rows.row[row].cell[4]);
+    }
+    double rate = atof_comm(rate_buf);
+
+    double hours = (out_min - in_min) / 60.0;
+    if (hours < 0) hours += 24.0;
+    char hours_buf[32], sum_buf[32];
+    snprintf(hours_buf, sizeof(hours_buf), "%.2f", hours);
+    /* Сумма из округлённых часов — как в «Пришла/Ушла», без расхождений. */
+    double hours_val = atof_comm(hours_buf);
+    snprintf(sum_buf, sizeof(sum_buf), "%.2f", hours_val * rate);
+
+    free(rows.row[row].cell[3]);
+    rows.row[row].cell[3] = strdup(hours_buf);
+    free(rows.row[row].cell[5]);
+    rows.row[row].cell[5] = strdup(sum_buf);
+
+    if (sheets_write_rows(tab, &rows) != 0) {
+        snprintf(out, cap,
+                 "{\"ok\":false,\"error\":\"не удалось записать в таблицу\"}");
+        code = 500;
+        goto fill_finish;
+    }
+
+    char *en = json_escape_local(name);
+    snprintf(out, cap,
+             "{\"ok\":true,\"name\":\"%s\",\"month\":\"%s\",\"date\":\"%s\","
+             "\"day\":%d,\"in\":\"%s\",\"out\":\"%s\","
+             "\"hours\":\"%s\",\"sum\":\"%s\"}",
+             en ? en : "", tab, date, day, norm_in, norm_out, hours_buf, sum_buf);
+    free(en);
+    trk_log("FILL: %s date=%s in=%s out=%s hours=%s sum=%s",
+            name, date, norm_in, norm_out, hours_buf, sum_buf);
+    code = 200;
+
+fill_finish:
+    trows_free(&rows);
+    free(name);
+    return code;
+}
+
 /* HTTP-обёртка над tracking_do_clock */
+
 static void api_tracking_clock(int fd, const char *query, const char *body) {
     (void)body;
     char *action = query_param(query, "action");
@@ -1424,6 +1759,37 @@ static void api_tracking_clock(int fd, const char *query, const char *body) {
                        : "500 Internal Server Error";
     trk_reply(fd, status, out);
     free(action);
+}
+
+/* GET /api/tracking/days?month=Октябрь 2026 — какие дни уже отмечены. */
+static void api_tracking_days(int fd, const char *query) {
+    char *month = query_param(query, "month");
+    char out[16384];
+    int code = tracking_days_json(month, out, sizeof(out));
+    const char *status = (code == 200) ? "200 OK"
+                       : (code == 400) ? "400 Bad Request"
+                       : "500 Internal Server Error";
+    trk_reply(fd, status, out);
+    free(month);
+}
+
+/* POST /api/tracking/fill?month=...&day=...&in=...&out=...
+   Добавляет отработанное ранее время за день в таблицу Time tracking. */
+static void api_tracking_fill(int fd, const char *query) {
+    char *month = query_param(query, "month");
+    char *day_s = query_param(query, "day");
+    char *in_s  = query_param(query, "in");
+    char *out_s = query_param(query, "out");
+    int day = (day_s && *day_s) ? atoi(day_s) : 0;
+
+    char out[2048];
+    int code = tracking_fill_day(month, day, in_s, out_s, out, sizeof(out));
+    const char *status = (code == 200) ? "200 OK"
+                       : (code == 409) ? "409 Conflict"
+                       : (code == 400) ? "400 Bad Request"
+                       : "500 Internal Server Error";
+    trk_reply(fd, status, out);
+    free(month); free(day_s); free(in_s); free(out_s);
 }
 
 /* GET /api/tracking/summary?month=...&name=... — сводка по сотруднику */
@@ -1667,6 +2033,14 @@ void tracking_handle(int fd, const char *method, const char *path, const char *b
 
     if (strncmp(path, "/api/tracking/clock", 18) == 0) {
         api_tracking_clock(fd, path, body);
+        return;
+    }
+    if (strncmp(path, "/api/tracking/days", 18) == 0) {
+        api_tracking_days(fd, path);
+        return;
+    }
+    if (strncmp(path, "/api/tracking/fill", 18) == 0) {
+        api_tracking_fill(fd, path);
         return;
     }
     if (strncmp(path, "/api/tracking/summary", 20) == 0) {
