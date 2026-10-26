@@ -1954,7 +1954,8 @@ int tracking_ensure_month(const char *month, char *out, size_t cap) {
         goto ensure_finish;
     }
 
-    snprintf(out, cap, "{\"ok\":true,\"month\":\"%s\",\"rows\":%d}", tab, rows.count);
+    snprintf(out, cap, "{\"ok\":true,\"month\":\"%s\",\"rows\":%d,\"sheet_id\":\"%s\"}",
+             tab, rows.count, g_sheet_id ? g_sheet_id : "");
     trk_log("ENSURE MONTH: %s rows=%d", tab, rows.count);
     trk_cache_invalidate(tab);
 
