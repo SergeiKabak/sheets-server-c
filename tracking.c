@@ -65,6 +65,11 @@ static char *g_api_base = NULL;
 static char *g_drive_base = NULL;
 /* Последняя ошибка (для диагностики) */
 static char g_last_error[512] = "";
+/* Последние ответы Google для диагностики создания вкладки */
+static int g_last_get_status = 0;
+static char g_last_get_resp[512] = "";
+static int g_last_create_status = 0;
+static char g_last_create_resp[512] = "";
 
 static void trk_log(const char *fmt, ...) {
     va_list ap;
@@ -599,6 +604,8 @@ static char *sheets_get_values(const char *sheet_name) {
                 free(enc2);
                 int st2 = 0;
                 char *r2 = http_request_full("GET", url2, NULL, NULL, NULL, &st2);
+                g_last_get_status = st2;
+                if (r2) snprintf(g_last_get_resp, sizeof(g_last_get_resp), "%.400s", r2);
                 if (r2 && st2 == 200) return r2;
                 free(r2);
             }
@@ -619,6 +626,8 @@ static char *sheets_get_values(const char *sheet_name) {
     int status = 0;
     char *resp = http_request_full("GET", url, NULL, NULL, token, &status);
     if (!resp) return NULL;
+    g_last_get_status = status;
+    snprintf(g_last_get_resp, sizeof(g_last_get_resp), "%.400s", resp);
     if (status != 200) {
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
@@ -751,6 +760,8 @@ static int sheets_create_sheet(const char *sheet_name) {
     int status = 0;
     char *resp = http_request_full("POST", url, "application/json", body, token, &status);
     if (!resp) return -1;
+    g_last_create_status = status;
+    snprintf(g_last_create_resp, sizeof(g_last_create_resp), "%.400s", resp);
     if (status != 200) {
         /* Вкладка уже существует — это не ошибка */
         if (strstr(resp, "already exists")) {
@@ -1917,6 +1928,10 @@ fill_finish:
 int tracking_ensure_month(const char *month, char *out, size_t cap) {
     if (!out || cap < 128) return 500;
     out[0] = '\0';
+    g_last_get_status = 0;
+    g_last_get_resp[0] = '\0';
+    g_last_create_status = 0;
+    g_last_create_resp[0] = '\0';
 
     tracking_ensure_init();
     if (!g_sheet_id && tracking_ensure_spreadsheet() != 0) {
@@ -1954,8 +1969,16 @@ int tracking_ensure_month(const char *month, char *out, size_t cap) {
         goto ensure_finish;
     }
 
-    snprintf(out, cap, "{\"ok\":true,\"month\":\"%s\",\"rows\":%d,\"sheet_id\":\"%s\"}",
-             tab, rows.count, g_sheet_id ? g_sheet_id : "");
+    char *eg = json_escape_local(g_last_get_resp);
+    char *ec = json_escape_local(g_last_create_resp);
+    snprintf(out, cap,
+             "{\"ok\":true,\"month\":\"%s\",\"rows\":%d,\"sheet_id\":\"%s\","
+             "\"get_status\":%d,\"get_resp\":\"%s\","
+             "\"create_status\":%d,\"create_resp\":\"%s\"}",
+             tab, rows.count, g_sheet_id ? g_sheet_id : "",
+             g_last_get_status, eg ? eg : "",
+             g_last_create_status, ec ? ec : "");
+    free(eg); free(ec);
     trk_log("ENSURE MONTH: %s rows=%d", tab, rows.count);
     trk_cache_invalidate(tab);
 
@@ -2014,7 +2037,7 @@ static void api_tracking_fill(int fd, const char *query) {
    Создаёт отсутствующую вкладку месяца и пишет заголовки. */
 static void api_tracking_ensure(int fd, const char *query) {
     char *month = query_param(query, "month");
-    char out[2048];
+    char out[8192];
     int code = tracking_ensure_month(month, out, sizeof(out));
     const char *status = (code == 200) ? "200 OK"
                        : (code == 400) ? "400 Bad Request"
