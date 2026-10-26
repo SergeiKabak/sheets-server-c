@@ -15,7 +15,22 @@ static char *g_last_put = NULL;
 static char *g_last_put_url = NULL;
 static int g_put_count = 0;
 static int g_values_gets = 0;
-static int g_created_sep = 0;
+static char g_created[8][32];
+static int g_created_count = 0;
+
+static int created_has(const char *tab) {
+    for (int i = 0; i < g_created_count; i++) {
+        if (strcmp(g_created[i], tab) == 0) return 1;
+    }
+    return 0;
+}
+
+static int created_in_url(const char *url) {
+    for (int i = 0; i < g_created_count; i++) {
+        if (strstr(url, g_created[i])) return 1;
+    }
+    return 0;
+}
 
 static const char *MONTH_JSON =
     "{\"range\":\"'10.2026'!A1:F8\",\"majorDimension\":\"ROWS\",\"values\":["
@@ -47,8 +62,7 @@ char *http_request_full(const char *method, const char *url,
         if (strstr(url, "/values/")) {
             g_values_gets++;
             if (strstr(url, "10.2026")) return strdup(MONTH_JSON);
-            if (strstr(url, "09.2026") && g_created_sep)
-                return strdup("{\"values\":[]}");
+            if (created_in_url(url)) return strdup("{\"values\":[]}");
             if (status) *status = 404;
             g_status = 404;
             return strdup("{\"error\":{\"code\":404,\"message\":\"not found\"}}");
@@ -66,7 +80,18 @@ char *http_request_full(const char *method, const char *url,
     }
 
     if (strcmp(method, "POST") == 0 && strstr(url, "batchUpdate")) {
-        if (body && strstr(body, "09.2026")) g_created_sep = 1;
+        if (body && g_created_count < 8) {
+            const char *p = strstr(body, "\"title\":\"");
+            if (p) {
+                p += 9;
+                const char *e = strchr(p, '"');
+                if (e && (size_t)(e - p) < sizeof(g_created[0])) {
+                    memcpy(g_created[g_created_count], p, (size_t)(e - p));
+                    g_created[g_created_count][e - p] = '\0';
+                    g_created_count++;
+                }
+            }
+        }
         return strdup("{\"replies\":[]}");
     }
 
@@ -202,13 +227,40 @@ int main(int argc, char **argv) {
     code = tracking_fill_day("Сентябрь 2026", 10, "07:30", "14:40", out, sizeof(out));
     printf("fill sep: %d %s\n", code, out);
     check(code == 200, "fill: прошлый месяц записан");
-    check(g_created_sep, "fill: вкладка прошлого месяца создана");
+    check(created_has("09.2026"), "fill: вкладка прошлого месяца создана");
     check(g_put_count == before + 1, "fill: запись в новую вкладку");
     check(g_last_put_url && strstr(g_last_put_url, "09.2026"), "fill: запись ушла в 09.2026");
     check(g_last_put && strstr(g_last_put, "\"Дата\",\"Время прихода\",\"Время ухода\""),
           "fill: заголовки новой вкладки записаны");
     check(g_last_put && strstr(g_last_put, "\"10.09.2026\",\"07:30\",\"14:40\""),
           "fill: строка 10.09 записана");
+
+    /* Сценарий пользователя: вкладки месяца ещё нет в Time tracking.
+       Дни пустые (в графике плюсы), а fill создаёт вкладку "10.2025". */
+    remove("/tmp/trk_days_10.2025.json");
+    int gets_missing = g_values_gets;
+    code = tracking_days_json("Октябрь 2025", out, sizeof(out));
+    printf("days missing: %d %s\n", code, out);
+    check(code == 200 && strstr(out, "\"days\":{}") != NULL,
+          "days: нет вкладки месяца -> пустые дни");
+    check(g_values_gets == gets_missing + 1,
+          "days: нет вкладки месяца -> один запрос в Google");
+    check(access("/tmp/trk_days_10.2025.json", R_OK) == 0,
+          "cache: пустой месяц закэширован");
+
+    before = g_put_count;
+    code = tracking_fill_day("Октябрь 2025", 10, "07:30", "14:40", out, sizeof(out));
+    printf("fill missing month: %d %s\n", code, out);
+    check(code == 200 && strstr(out, "\"month\":\"10.2025\""),
+          "fill: создан месяц 10.2025");
+    check(created_has("10.2025"), "fill: вкладка названа 10.2025");
+    check(g_put_count == before + 1, "fill: запись в созданную вкладку");
+    check(g_last_put_url && strstr(g_last_put_url, "10.2025"),
+          "fill: запись ушла в 10.2025");
+    check(g_last_put && strstr(g_last_put, "\"10.10.2025\",\"07:30\",\"14:40\""),
+          "fill: строка 10.10 записана");
+    check(access("/tmp/trk_days_10.2025.json", R_OK) != 0,
+          "fill: пустой кэш 10.2025 сброшен");
 
     char *p1 = query_param("/api/tracking/fill?month=10.2026&day=5&in=07:30&out=14:40", "in");
     char *p2 = query_param("/api/tracking/fill?month=10.2026&day=5&min=bad", "in");
