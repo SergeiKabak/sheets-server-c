@@ -45,6 +45,11 @@ static double atof_comm(const char *s) {
    отдельном процессе (fork), общие файлы приводили к гонке. */
 #define TRK_TMPFMT    "/tmp/trk_%d_%s"
 #define TRK_TMPMAX    256
+/* Кэш отметок времени по месяцам. Обновляется фоновым процессом раз в
+   CACHE_TTL (60 с), поэтому в браузере не нужно ждать Google при каждом
+   переключении месяца. 90 с — запас на время самого обновления. */
+#define TRK_CACHE_TTL 90
+#define TRK_CACHE_MAX_MONTHS 24
 
 static char *g_sa_json = NULL;
 static char *g_sheet_id = NULL;
@@ -1270,6 +1275,7 @@ static int append_row(const char *const cells[6]) {
 
 static int tracking_ensure_spreadsheet(void);
 static void api_tracking_diag(int fd, const char *query);
+static void trk_cache_invalidate(const char *tab);
 
 /* Ответ клиенту */
 static void trk_reply(int fd, const char *status, const char *body) {
@@ -1464,6 +1470,7 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
     }
 
 finish:
+    if (code == 200 && g_current_sheet[0]) trk_cache_invalidate(g_current_sheet);
     trows_free(&rows);
     free(name);
     return code;
@@ -1473,10 +1480,61 @@ finish:
  *  Заполнение ранее отработанного времени (из графика смен)
  * ================================================================== */
 
+/* ---------- файловый кэш отметок по месяцам ---------- */
+/* /tmp/trk_days_10.2026.json — один файл на вкладку месяца. */
+static int trk_cache_path(const char *tab, char *out, size_t cap) {
+    if (!tab || !*tab || strlen(tab) > 16) return -1;
+    for (const unsigned char *p = (const unsigned char *)tab; *p; p++) {
+        if (!isdigit(*p) && *p != '.') return -1;
+    }
+    snprintf(out, cap, "/tmp/trk_days_%s.json", tab);
+    return 0;
+}
+
+static int trk_cache_read(const char *tab, char *out, size_t cap, int max_age) {
+    char path[256];
+    if (trk_cache_path(tab, path, sizeof(path)) != 0) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    if (max_age >= 0 && time(NULL) - st.st_mtime > max_age) return -1;
+    if (st.st_size <= 0 || (size_t)st.st_size >= cap) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t n = fread(out, 1, (size_t)st.st_size, f);
+    fclose(f);
+    if (n != (size_t)st.st_size) return -1;
+    out[n] = '\0';
+    return 0;
+}
+
+static int trk_cache_write(const char *tab, const char *json) {
+    char path[256], tmp[300];
+    if (trk_cache_path(tab, path, sizeof(path)) != 0) return -1;
+    snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return -1;
+    size_t len = strlen(json);
+    if (fwrite(json, 1, len, f) != len) {
+        fclose(f);
+        remove(tmp);
+        return -1;
+    }
+    fclose(f);
+    if (rename(tmp, path) != 0) {
+        remove(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+static void trk_cache_invalidate(const char *tab) {
+    char path[256];
+    if (trk_cache_path(tab, path, sizeof(path)) == 0) remove(path);
+}
+
 /* GET /api/tracking/days?month=Октябрь 2026
-   Отдаёт уже внесённые дни месяца, чтобы Mini App показал "+" только там,
-   где время ещё не отмечено. */
-int tracking_days_json(const char *month, char *out, size_t cap) {
+   Строит ответ напрямую из Google Sheets (без кэша). */
+static int tracking_days_build(const char *month, char *out, size_t cap) {
     if (!out || cap < 128) return 500;
     out[0] = '\0';
 
@@ -1571,6 +1629,111 @@ int tracking_days_json(const char *month, char *out, size_t cap) {
     free(name);
     trows_free(&rows);
     return 200;
+}
+
+/* Публичная версия: сначала свежий локальный кэш, затем Google.
+   Кэш обновляет background_updater() раз в 60 секунд. */
+int tracking_days_json(const char *month, char *out, size_t cap) {
+    if (!out || cap < 128) return 500;
+    out[0] = '\0';
+
+    char tab[64];
+    int pmon = 0, pyear = 0;
+    if (month_sheet_and_parts(month, tab, sizeof(tab), &pmon, &pyear) != 0) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный месяц\"}");
+        return 400;
+    }
+    if (trk_cache_read(tab, out, cap, TRK_CACHE_TTL) == 0) {
+        return 200;
+    }
+
+    int code = tracking_days_build(month, out, cap);
+    if (code == 200) trk_cache_write(tab, out);
+    return code;
+}
+
+/* Только из кэша — для /api/month, чтобы не делать второй HTTP-запрос
+   из Mini App. Возвращает 0, если актуальный кэш есть. */
+int tracking_days_cached_json(const char *month, char *out, size_t cap) {
+    char tab[64];
+    int pmon = 0, pyear = 0;
+    if (!out || cap < 128) return -1;
+    if (month_sheet_and_parts(month, tab, sizeof(tab), &pmon, &pyear) != 0) return -1;
+    return trk_cache_read(tab, out, cap, TRK_CACHE_TTL);
+}
+
+/* Ответ для месяца, вкладки которого ещё нет в Time tracking:
+   все дни пустые, значит в графике будут плюсы. */
+static int tracking_days_empty(const char *month, char *out, size_t cap) {
+    char tab[64];
+    int pmon = 0, pyear = 0;
+    if (month_sheet_and_parts(month, tab, sizeof(tab), &pmon, &pyear) != 0) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный месяц\"}");
+        return 400;
+    }
+    char today[32];
+    current_datetime(today, sizeof(today), NULL, 0);
+    char label[128];
+    tracking_month_label(tab, label, sizeof(label));
+    char *em = json_escape_local(tab);
+    char *el = json_escape_local(label);
+    int n = snprintf(out, cap,
+        "{\"ok\":true,\"month\":\"%s\",\"label\":\"%s\","
+        "\"today\":\"%s\",\"days\":{}}",
+        em ? em : "", el ? el : "", today);
+    free(em); free(el);
+    return (n > 0 && (size_t)n < cap) ? 200 : 500;
+}
+
+/* Принудительно обновляет кэш для месяцев графика.
+   Вызывается из background_updater() вместе с обновлением расписания. */
+int tracking_cache_refresh(const char *const *months, int count) {
+    if (!months || count <= 0) return 0;
+    const char *sa = getenv("GOOGLE_SERVICE_ACCOUNT_JSON");
+    if (!sa || !*sa) return 0;
+
+    tracking_ensure_init();
+    if (!g_sheet_id) {
+        const char *id = getenv("TRACKING_SHEET_ID");
+        int has_cached_id = (access("/tmp/tracking_sheet_id", R_OK) == 0);
+        if ((!id || !*id) && !has_cached_id) return 0;
+        if (tracking_ensure_spreadsheet() != 0) return -1;
+    }
+
+    /* Один раз получаем список существующих вкладок: для месяцев без
+       вкладки не делаем лишний запрос к Google (и не пишем 404 в лог). */
+    char **tabs = NULL;
+    int tabc = 0;
+    int have_tabs = (tracking_list_months(&tabs, &tabc, 64) == 0);
+
+    char out[16384];
+    int ok = 0;
+    int lim = count < TRK_CACHE_MAX_MONTHS ? count : TRK_CACHE_MAX_MONTHS;
+    for (int i = 0; i < lim; i++) {
+        if (!months[i] || !*months[i]) continue;
+        char tab[64];
+        int pmon = 0, pyear = 0;
+        if (month_sheet_and_parts(months[i], tab, sizeof(tab), &pmon, &pyear) != 0)
+            continue;
+
+        int exists = 0;
+        if (have_tabs) {
+            for (int j = 0; j < tabc; j++) {
+                if (tabs[j] && strcmp(tabs[j], tab) == 0) { exists = 1; break; }
+            }
+        }
+        int code = (have_tabs && !exists)
+                 ? tracking_days_empty(months[i], out, sizeof(out))
+                 : tracking_days_build(months[i], out, sizeof(out));
+        if (code != 200) continue;
+        if (trk_cache_write(tab, out) == 0) ok++;
+    }
+    if (tabs) {
+        for (int j = 0; j < tabc; j++) free(tabs[j]);
+        free(tabs);
+    }
+    trk_log("cache refreshed: %d/%d months", ok, lim);
+    return ok;
 }
 
 /* POST /api/tracking/fill?month=...&day=...&in=...&out=...
@@ -1741,6 +1904,7 @@ int tracking_fill_day(const char *month, int day, const char *in_time,
     code = 200;
 
 fill_finish:
+    if (code == 200) trk_cache_invalidate(tab);
     trows_free(&rows);
     free(name);
     return code;

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <utime.h>
 
 #include "tracking.c"
 
@@ -13,6 +14,7 @@ static int g_status;
 static char *g_last_put = NULL;
 static char *g_last_put_url = NULL;
 static int g_put_count = 0;
+static int g_values_gets = 0;
 static int g_created_sep = 0;
 
 static const char *MONTH_JSON =
@@ -43,6 +45,7 @@ char *http_request_full(const char *method, const char *url,
             return strdup("{\"spreadsheetId\":\"SHEET123\"}");
         }
         if (strstr(url, "/values/")) {
+            g_values_gets++;
             if (strstr(url, "10.2026")) return strdup(MONTH_JSON);
             if (strstr(url, "09.2026") && g_created_sep)
                 return strdup("{\"values\":[]}");
@@ -119,18 +122,50 @@ int main(int argc, char **argv) {
     char out[16384];
     int code;
 
+    remove("/tmp/trk_days_10.2026.json");
+    remove("/tmp/trk_days_09.2026.json");
+
+    int gets0 = g_values_gets;
     code = tracking_days_json("Октябрь 2026", out, sizeof(out));
     printf("days: %d %s\n", code, out);
     check(code == 200, "GET days: код 200");
+    check(g_values_gets == gets0 + 1, "GET days: первый вызов читает Google");
     check(strstr(out, "\"month\":\"10.2026\"") != NULL, "GET days: месяц 10.2026");
     check(strstr(out, "\"5\":{\"in\":\"07:30\",\"out\":\"14:40\"") != NULL, "GET days: день 5 отмечен");
     check(strstr(out, "\"6\":{\"in\":\"08:00\",\"out\":\"\"") != NULL, "GET days: день 6 без ухода");
     check(!strstr(out, "\"5\":{\"in\":\"09:00\""), "GET days: чужой сотрудник не попал");
 
+    int gets1 = g_values_gets;
+    code = tracking_days_json("10.2026", out, sizeof(out));
+    check(code == 200 && g_values_gets == gets1, "GET days: повторный вызов из кэша");
+
+    struct utimbuf ut;
+    ut.actime = ut.modtime = time(NULL) - 1000;
+    utime("/tmp/trk_days_10.2026.json", &ut);
+    int gets_stale = g_values_gets;
+    code = tracking_days_json("10.2026", out, sizeof(out));
+    check(code == 200 && g_values_gets == gets_stale + 1,
+          "GET days: устаревший кэш перечитывается из Google");
+
+    char cached[16384];
+    check(tracking_days_cached_json("Октябрь 2026", cached, sizeof(cached)) == 0,
+          "cache: свежий кэш доступен напрямую");
+    check(tracking_days_cached_json("Ноябрь 2026", cached, sizeof(cached)) == -1,
+          "cache: для месяца без файла кэша нет");
+    check(access("/tmp/trk_days_10.2026.json", R_OK) == 0, "cache: файл месяца создан");
+
+    const char *labels[] = {"Октябрь 2026", "Сентябрь 2026"};
+    int nref = tracking_cache_refresh(labels, 2);
+    check(nref == 2, "cache: фоновое обновление двух месяцев");
+    check(access("/tmp/trk_days_09.2026.json", R_OK) == 0,
+          "cache: файл прошлого месяца создан");
+
     int before = g_put_count;
     code = tracking_fill_day("Октябрь 2026", 7, "7:30", "14:40", out, sizeof(out));
     printf("fill 7: %d %s\n", code, out);
     check(code == 200, "fill: новый день записан");
+    check(access("/tmp/trk_days_10.2026.json", R_OK) != 0,
+          "fill: кэш месяца сброшен после записи");
     check(g_put_count == before + 1, "fill: одна запись в таблицу");
     check(strstr(out, "\"hours\":\"7.17\"") && strstr(out, "\"sum\":\"3585.00\""),
           "fill: часы и сумма рассчитаны");

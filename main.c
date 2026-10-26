@@ -402,6 +402,21 @@ static int save_months(MonthEntry *mo, int count) {
     return 0;
 }
 
+/* Освобождает строки месяца после сохранения в файл/кэш.
+   Фоновый процесс работает постоянно, поэтому без этого была утечка. */
+static void free_months(MonthEntry *mo, int count) {
+    for (int i = 0; i < count; i++) {
+        for (int j = 0; j < mo[i].shift1_len; j++) free(mo[i].shift1[j]);
+        for (int j = 0; j < mo[i].shift2_len; j++) free(mo[i].shift2[j]);
+        free(mo[i].shift1);
+        free(mo[i].shift2);
+        mo[i].shift1 = NULL;
+        mo[i].shift2 = NULL;
+        mo[i].shift1_len = 0;
+        mo[i].shift2_len = 0;
+    }
+}
+
 static char *json_escape(const char *s);
 
 /* Разбирает смену вида "7:30-14:40" в минуты от полуночи.
@@ -1040,8 +1055,12 @@ static void serve_miniapp(int fd) {
         "td.style.cursor='pointer';td.style.textDecoration='underline dotted';td.style.color='#1a73e8';"
         "td.onclick=function(){showColleagues(parseInt(this.dataset.day,10), this.dataset.cabinet, this.dataset.shift);};"
         "});"
-        "TRK={};TRK_META={};trkSelectedMonth=(d.t||M[cur]||'');"
-        "loadTracking(trkSelectedMonth);"
+        "trkSelectedMonth=(d.t||M[cur]||'');"
+        "var tk=d.trk;"
+        "if(tk&&tk.ok){TRK=tk.days||{};"
+        "TRK_META={month:tk.month||'',label:tk.label||trkSelectedMonth,today:tk.today||''};"
+        "renderTracking();"
+        "}else{TRK={};TRK_META={};loadTracking(trkSelectedMonth);}"
         "}"
         "function showColleagues(day,cabinet,shift){if(!cabinet)return;var m=M[cur];fetch('/api/cabinet?month='+encodeURIComponent(m)+'&cabinet='+encodeURIComponent(cabinet)+'&day='+day+(shift?'&shift='+encodeURIComponent(shift):'')).then(function(r){return r.json();}).then(function(d){var l=d.colleagues||[];var t='Кабинет '+cabinet+', день '+day+(m?' ('+m+')':'')+(shift?', смена '+shift:'');t+=l.length?'\\n\\nВместе с Бинкевич Татьяна Эдуардовна:\\n'+l.map(function(c){return '• '+c.name+(c.shift?' — '+c.shift:'');}).join('\\n'):'\\n\\nНикто другой не работает в этом кабинете в этот день.';alert(t);});}"
         "var M=[];var cur=-1;"
@@ -1171,6 +1190,7 @@ static void serve_miniapp(int fd) {
         "if(r.hours!==undefined&&r.hours!==null)msg+='\\nОтработано: '+r.hours+' ч.';"
         "if(r.sum!==undefined&&r.sum!==null&&r.sum!=='')msg+='\\nСумма: '+r.sum;"
         "trkMsg(msg,true);tgAlert(msg);"
+        "try{if(typeof loadTracking==='function')loadTracking(trkSelectedMonth);}catch(e){}"
         "}else{var err=r.error||('HTTP '+xhr.status);trkMsg('Ошибка: '+err,false);tgAlert(err);}"
         "if(cb)cb(r);"
         "};"
@@ -1293,7 +1313,13 @@ static void api_month(int fd, const char *query) {
     int c1 = m->shift1_len, c2 = m->shift2_len;
     int n = c1 > c2 ? c1 : c2; if (n < 1) n = 1;
 
-    size_t cap = 128 + n * 64;
+    /* Отметки Time tracking берём из локального кэша (его обновляет
+       background_updater раз в 60 с). Если кэша нет — клиент запросит
+       /api/tracking/days и получит данные напрямую из Google. */
+    char trk[16384];
+    int have_trk = (tracking_days_cached_json(m->title, trk, sizeof(trk)) == 0);
+
+    size_t cap = 256 + (size_t)n * 160 + (have_trk ? strlen(trk) : 4);
     char *json = malloc(cap);
     if (!json) { http_reply(fd, "500 Internal Server Error", "{}"); return; }
     int off = snprintf(json, cap, "{\"t\":");
@@ -1314,7 +1340,8 @@ static void api_month(int fd, const char *query) {
         off += snprintf(json + off, cap - off, "%s\"%s\"", i ? "," : "", ev);
         free((void*)ev);
     }
-    snprintf(json + off, cap - off, "]}");
+    off += snprintf(json + off, cap - off, "],\"trk\":%s}",
+                    have_trk ? trk : "null");
 
     char hdr[256];
     int hlen = snprintf(hdr, sizeof(hdr),
@@ -1565,6 +1592,18 @@ static void background_updater(void) {
         if (idx) { fclose(idx); fprintf(stderr, "[cabinet] index saved\n"); }
         save_months(mo, c);
         fprintf(stderr, "[updater] months cached: %d\n", c);
+
+        /* Тот же цикл обновляет и кэш отметок Time tracking, чтобы Mini App
+           не ждал Google при переключении месяца. */
+        if (c > 0) {
+            const char *labels[MAX_MONTHS];
+            int lc = 0;
+            for (int i = 0; i < c && i < MAX_MONTHS; i++) labels[lc++] = mo[i].title;
+            int tn = tracking_cache_refresh(labels, lc);
+            if (tn >= 0) fprintf(stderr, "[updater] tracking cache months: %d\n", tn);
+        }
+        free_months(mo, c);
+
         /* Кнопка меню чата (доступ к графику-таблице) ставится периодически:
            если при старте запрос не прошёл, доступ к таблице восстановится. */
         set_chat_menu_button();

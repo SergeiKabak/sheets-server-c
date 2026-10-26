@@ -44,6 +44,14 @@ int tracking_month_total(const char *month, double *hours, double *sum, int *day
    Нужен Mini App, чтобы показать "+" только там, где время ещё не внесено. */
 int tracking_days_json(const char *month, char *out, size_t cap);
 
+/* То же, но только из локального кэша (без обращения к Google).
+   Возвращает 0, если свежий кэш есть; -1 — если кэша нет/он устарел. */
+int tracking_days_cached_json(const char *month, char *out, size_t cap);
+
+/* Обновляет кэш отметок для месяцев графика. Вызывается фоновым
+   процессом раз в 60 секунд. months — названия месяцев из расписания. */
+int tracking_cache_refresh(const char *const *months, int count);
+
 /* Заполняет отработанное время за произвольный день месяца графика.
    month — "Октябрь 2026" или "10.2026", day — 1..31,
    in_time / out_time — "ЧЧ:ММ" (например "07:30").
