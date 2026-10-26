@@ -1810,6 +1810,8 @@ int tracking_fill_day(const char *month, int day, const char *in_time,
         return 500;
     }
 
+    /* Если вкладки месяца ещё нет — load_or_create_month_sheet() создаст
+       её с именем MM.YYYY (например, "10.2026" для октября 2026). */
     if (load_or_create_month_sheet(tab, &rows) != 0) {
         char *e = json_escape_local(g_last_error[0] ? g_last_error
                                     : "не удалось открыть вкладку месяца");
