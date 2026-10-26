@@ -63,6 +63,8 @@ char *http_request_full(const char *method, const char *url,
             g_values_gets++;
             if (strstr(url, "10.2026")) return strdup(MONTH_JSON);
             if (created_in_url(url)) return strdup("{\"values\":[]}");
+            if (strstr(url, "11.2025"))
+                return strdup("{\"error\":{\"code\":400,\"message\":\"Unable to parse range: '11.2025'!A:F\"}}");
             if (status) *status = 404;
             g_status = 404;
             return strdup("{\"error\":{\"code\":404,\"message\":\"not found\"}}");
@@ -71,6 +73,19 @@ char *http_request_full(const char *method, const char *url,
     }
 
     if (strcmp(method, "PUT") == 0) {
+        if (strstr(url, "12.2025")) {
+            g_put_count++;
+            free(g_last_put);
+            free(g_last_put_url);
+            g_last_put = strdup(body ? body : "");
+            g_last_put_url = strdup(url ? url : "");
+            return strdup("{\"error\":{\"code\":400,\"message\":\"Unable to parse range: '12.2025'!A1:F4\"}}");
+        }
+        if (!created_in_url(url) && !strstr(url, "10.2026")) {
+            if (status) *status = 404;
+            g_status = 404;
+            return strdup("{\"error\":{\"code\":404,\"message\":\"not found\"}}");
+        }
         g_put_count++;
         free(g_last_put);
         free(g_last_put_url);
@@ -270,6 +285,24 @@ int main(int argc, char **argv) {
     check(created_has("10.2024"), "ensure: имя вкладки 10.2024");
     check(g_last_put && strstr(g_last_put, "\"Дата\",\"Время прихода\",\"Время ухода\""),
           "ensure: заголовки записаны");
+
+    /* Google может вернуть тело ошибки "Unable to parse range" с HTTP 200.
+       Это не должно приниматься за существующую вкладку. */
+    remove("/tmp/trk_days_11.2025.json");
+    code = tracking_days_json("Ноябрь 2025", out, sizeof(out));
+    check(code == 200 && strstr(out, "\"days\":{}") != NULL,
+          "google 200-error: отсутствующая вкладка считается пустой");
+    code = tracking_fill_day("Ноябрь 2025", 20, "07:30", "14:40", out, sizeof(out));
+    printf("fill 200-error month: %d %s\n", code, out);
+    check(code == 200 && strstr(out, "\"month\":\"11.2025\"") != NULL,
+          "google 200-error: вкладка создаётся и запись проходит");
+    check(created_has("11.2025"), "google 200-error: создана 11.2025");
+
+    /* Ошибка в теле ответа при записи не должна выглядеть как успех. */
+    code = tracking_fill_day("Декабрь 2025", 20, "07:30", "14:40", out, sizeof(out));
+    printf("fill write-error month: %d %s\n", code, out);
+    check(code == 500 && !strstr(out, "\"ok\":true"),
+          "google 200-error: ошибка записи не выдаётся за успех");
 
     char *p1 = query_param("/api/tracking/fill?month=10.2026&day=5&in=07:30&out=14:40", "in");
     char *p2 = query_param("/api/tracking/fill?month=10.2026&day=5&min=bad", "in");

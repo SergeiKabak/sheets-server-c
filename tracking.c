@@ -585,6 +585,21 @@ static int detect_api_disabled(const char *resp) {
     return 0;
 }
 
+/* Google иногда отдаёт тело ошибки с HTTP-кодом 200 (через прокси).
+   Проверяем наличие поля "error" в JSON, иначе можно принять ошибку
+   за успешный ответ и решить, что запись выполнена. */
+static int resp_has_error(const char *resp) {
+    if (!resp) return 0;
+    const char *p = strstr(resp, "\"error\"");
+    while (p) {
+        const char *q = p + 7;
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        if (*q == ':') return 1;
+        p = strstr(p + 7, "\"error\"");
+    }
+    return 0;
+}
+
 /* ---------- Google Sheets: чтение листа ---------- */
 /* Возвращает JSON ответа values API или NULL. */
 static char *sheets_get_values(const char *sheet_name) {
@@ -606,7 +621,7 @@ static char *sheets_get_values(const char *sheet_name) {
                 char *r2 = http_request_full("GET", url2, NULL, NULL, NULL, &st2);
                 g_last_get_status = st2;
                 if (r2) snprintf(g_last_get_resp, sizeof(g_last_get_resp), "%.400s", r2);
-                if (r2 && st2 == 200) return r2;
+                if (r2 && st2 == 200 && !resp_has_error(r2)) return r2;
                 free(r2);
             }
         }
@@ -628,11 +643,17 @@ static char *sheets_get_values(const char *sheet_name) {
     if (!resp) return NULL;
     g_last_get_status = status;
     snprintf(g_last_get_resp, sizeof(g_last_get_resp), "%.400s", resp);
-    if (status != 200) {
-        if (!detect_api_disabled(resp))
+    if (status != 200 || resp_has_error(resp)) {
+        int parse_range = (resp && strstr(resp, "Unable to parse range") != NULL);
+        if (!parse_range) {
+            if (!detect_api_disabled(resp))
+                snprintf(g_last_error, sizeof(g_last_error),
+                         "ошибка чтения таблицы: код %d, ответ %.160s", status, resp);
+            trk_log("%s", g_last_error);
+        } else {
             snprintf(g_last_error, sizeof(g_last_error),
-                     "ошибка чтения таблицы: код %d, ответ %.160s", status, resp);
-        trk_log("%s", g_last_error);
+                     "вкладки '%s' ещё нет", sheet_name);
+        }
         free(resp);
         return NULL;
     }
@@ -660,7 +681,7 @@ static int sheets_append_row(const char *sheet_name, const char *values_json) {
     int status = 0;
     char *resp = http_request_full("POST", url, "application/json", body, token, &status);
     if (!resp) return -1;
-    if (status != 200) {
+    if (status != 200 || resp_has_error(resp)) {
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
                      "ошибка добавления строки: код %d, ответ %.160s", status, resp);
@@ -694,7 +715,7 @@ static int sheets_update_values_raw(const char *sheet_name, const char *a1_suffi
     int status = 0;
     char *resp = http_request_full("PUT", url, "application/json", values_object, token, &status);
     if (!resp) return -1;
-    if (status != 200) {
+    if (status != 200 || resp_has_error(resp)) {
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
                      "ошибка записи значений: код %d, ответ %.160s", status, resp);
@@ -728,7 +749,7 @@ static int sheets_update_range(const char *sheet_name, const char *a1_suffix,
     int status = 0;
     char *resp = http_request_full("PUT", url, "application/json", body, token, &status);
     if (!resp) return -1;
-    if (status != 200) {
+    if (status != 200 || resp_has_error(resp)) {
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
                      "ошибка обновления диапазона: код %d, ответ %.160s", status, resp);
@@ -762,7 +783,7 @@ static int sheets_create_sheet(const char *sheet_name) {
     if (!resp) return -1;
     g_last_create_status = status;
     snprintf(g_last_create_resp, sizeof(g_last_create_resp), "%.400s", resp);
-    if (status != 200) {
+    if (status != 200 || resp_has_error(resp)) {
         /* Вкладка уже существует — это не ошибка */
         if (strstr(resp, "already exists")) {
             trk_log("sheet '%s' already exists", sheet_name);
@@ -2142,7 +2163,7 @@ int tracking_list_months(char ***out, int *count, int max) {
              g_api_base, g_sheet_id);
     int status = 0;
     char *resp = http_request_full("GET", url, NULL, NULL, tok, &status);
-    if (!resp || status != 200) { free(resp); return -1; }
+    if (!resp || status != 200 || resp_has_error(resp)) { free(resp); return -1; }
 
     char **list = calloc((size_t)max, sizeof(char *));
     if (!list) { free(resp); return -1; }
@@ -2338,7 +2359,7 @@ static char *sheets_create_spreadsheet(const char *title) {
     snprintf(url, sizeof(url), "%s/v4/spreadsheets", g_api_base);
     char *resp = http_request_full("POST", url, "application/json", body, token, &status);
     if (!resp) return NULL;
-    if (status != 200) {
+    if (status != 200 || resp_has_error(resp)) {
         if (!detect_api_disabled(resp))
             snprintf(g_last_error, sizeof(g_last_error),
                      "ошибка создания таблицы: код %d, ответ %.160s", status, resp);
@@ -2379,7 +2400,7 @@ static int drive_share(const char *file_id, const char *email, const char *role)
     int status = 0;
     char *resp = http_request_full("POST", url, "application/json", body, token, &status);
     if (!resp) return -1;
-    if (status != 200 && status != 201) {
+    if (status != 200 && status != 201 || resp_has_error(resp)) {
         trk_log("drive_share status=%d resp=%.300s", status, resp);
         free(resp);
         return -1;
@@ -2399,7 +2420,7 @@ static int sheets_sheet_exists(const char *file_id) {
     int status = 0;
     char *resp = http_request_full("GET", url, NULL, NULL, token, &status);
     if (!resp) return 0;
-    int ok = (status == 200);
+    int ok = (status == 200 && !resp_has_error(resp));
     if (!ok) detect_api_disabled(resp);
     free(resp);
     return ok;
@@ -2421,8 +2442,12 @@ static int tracking_ensure_spreadsheet(void) {
             return 0;
         }
         snprintf(g_last_error, sizeof(g_last_error),
-                 "TRACKING_SHEET_ID=%s недоступен с текущими учётными данными", env_id);
+                 "TRACKING_SHEET_ID=%s недоступен с текущими учётными данными. "
+                 "Проверьте доступ Service Account к таблице.", env_id);
         trk_log("%s", g_last_error);
+        /* Если ID задан явно — не создаём другую таблицу: иначе записи
+           уйдут в новый файл, а пользователь ищет их в своей таблице. */
+        return -1;
     }
 
     /* 2) ID из локального кэша (создан ранее этим же сервис-аккаунтом) */
