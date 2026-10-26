@@ -1253,11 +1253,65 @@ static void trows_insert(TRows *t, int idx) {
     }
 }
 
-/* Полностью перезаписывает лист указанными строками (A1:F{n}).
-   Нужна, чтобы вставлять строки в середину (новый сотрудник / новый день)
-   и сохранять порядок блоков. */
+/* Полностью перезаписывает лист указанными строками (A1:F{n}). */
+/* Сравнивает две даты в формате ДД.ММ.ГГГГ. Возвращает <0, 0, >0. */
+static int cmp_dates(const char *a, const char *b) {
+    int d1 = 0, m1 = 0, y1 = 0, d2 = 0, m2 = 0, y2 = 0;
+    sscanf(a, "%d.%d.%d", &d1, &m1, &y1);
+    sscanf(b, "%d.%d.%d", &d2, &m2, &y2);
+    if (y1 != y2) return y1 - y2;
+    if (m1 != m2) return m1 - m2;
+    return d1 - d2;
+}
+
+/* Является ли строка строкой с датой. */
+static int is_date_row(TRow *r) {
+    if (cell_empty(r->cell[0])) return 0;
+    int d, m, y;
+    if (sscanf(r->cell[0], "%d.%d.%d", &d, &m, &y) == 3) return 1;
+    if (sscanf(r->cell[0], "%d/%d/%d", &d, &m, &y) == 3) return 1;
+    return 0;
+}
+
+/* Сортирует строки с датами внутри каждого блока сотрудника по дате
+   по возрастанию. Строка с ФИО и пустые разделители остаются на месте. */
+static void sort_date_rows(TRows *t) {
+    int i = 0;
+    while (i < t->count) {
+        if (!is_date_row(&t->row[i]) && !cell_empty(t->row[i].cell[0])) {
+            int block_start = i;
+            int block_end = block_start + 1;
+            while (block_end < t->count && !row_is_empty(&t->row[block_end]))
+                block_end++;
+            int first_date = block_start + 1;
+            int last_date = block_end - 1;
+            if (first_date < last_date) {
+                for (int a = first_date; a <= last_date; a++) {
+                    for (int b = first_date; b < last_date; b++) {
+                        if (!is_date_row(&t->row[b]) || !is_date_row(&t->row[b + 1]))
+                            continue;
+                        if (cmp_dates(t->row[b].cell[0], t->row[b + 1].cell[0]) > 0) {
+                            TRow tmp = t->row[b];
+                            t->row[b] = t->row[b + 1];
+                            t->row[b + 1] = tmp;
+                        }
+                    }
+                }
+            }
+            i = block_end;
+        } else {
+            i++;
+        }
+    }
+}
+
+/* Полностью перезаписывает лист указанными строками (A1:F{n}). */
 static int sheets_write_rows(const char *sheet_name, TRows *rows) {
     if (rows->count == 0) return 0;
+
+    /* Сортируем даты внутри блоков сотрудников, чтобы в таблице
+       отметки шли по порядку (01.09, 17.09, 30.09). */
+    sort_date_rows(rows);
 
     size_t cap = 1024 + (size_t)rows->count * 256;
     char *body = malloc(cap);
