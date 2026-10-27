@@ -9,17 +9,15 @@
   function trkMsg(txt, ok) {
     var el = document.getElementById('trk-st');
     if (!el) return;
+    if (!txt) {                 /* пустой текст — прячем баннер */
+      el.textContent = '';
+      el.className = 'trk-banner';
+      el.style.display = 'none';
+      return;
+    }
     el.textContent = txt;
     el.className = ok ? 'trk-banner ok' : 'trk-banner err';
     el.style.display = 'block';
-  }
-
-  function trkStatus() {
-    A.api.trackingSummary().then(function (dd) {
-      if (!dd || !dd.ok) return;
-      trkMsg('Отработано за ' + (dd.month || '') + ': ' +
-             dd.total_hours + ' ч., сумма ' + dd.total_sum, true);
-    });
   }
 
   /* ---------- данные отметок ---------- */
@@ -114,7 +112,6 @@
         A.calendar.renderTracking();
         closeTrkDialog();
         trkMsg('Записано: ' + d.date + ', ' + d.hours + ' ч., ' + d.sum, true);
-        trkStatus();
       } else if (e) {
         e.textContent = (d && d.error) ? d.error : 'Не удалось сохранить';
       }
@@ -152,7 +149,7 @@
            ': ' + s.toFixed(2) + '. Суммы по дням — в календаре.')
         : 'За этот месяц пока нет отработанных дней', s > 0);
     } else {
-      trkStatus();
+      trkMsg('');                /* итог и так виден в инфоблоке календаря */
     }
   }
 
@@ -170,20 +167,17 @@
     if (md) md.onclick = function (e) { if (e.target === md) closeTrkDialog(); };
     if (b1) b1.onclick = function () {
       b1.disabled = true; trkMsg('Сохраняем...', true);
-      clock('in', function () { b1.disabled = false; trkStatus(); });
+      clock('in', function () { b1.disabled = false; });
     };
     if (b2) b2.onclick = function () {
       b2.disabled = true; trkMsg('Сохраняем...', true);
-      clock('out', function () { b2.disabled = false; trkStatus(); });
+      clock('out', function () { b2.disabled = false; });
     };
     if (bm) bm.onclick = moneyToggle;
-
-    trkStatus();
   }
 
   A.tracking = {
     trkMsg: trkMsg,
-    trkStatus: trkStatus,
     loadTracking: loadTracking,
     monthSum: monthSum,
     dayAction: dayAction,

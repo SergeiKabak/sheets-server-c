@@ -162,19 +162,47 @@
     if (b) b.classList.toggle('on', !!S.MONEY_VIEW);
   }
 
-  /* Кто работает в кабинете в этот день */
+  /* Кто работает в кабинете в этот день — модалка в стиле диалога времени */
+  function openColleaguesModal(title, html) {
+    var t = document.getElementById('colleagues-title');
+    if (t) t.textContent = title;
+    var l = document.getElementById('colleagues-list');
+    if (l) l.innerHTML = html;
+    var m = document.getElementById('colleagues-modal');
+    if (m) m.classList.add('open');
+  }
+
+  function closeColleaguesModal() {
+    var m = document.getElementById('colleagues-modal');
+    if (m) m.classList.remove('open');
+  }
+
   function showColleagues(day, cabinet, shift) {
     if (!cabinet) return;
-    var m = S.M[S.cur];
-    A.api.colleagues(m, day, cabinet, shift).then(function (d) {
-      var l = (d && d.colleagues) || [];
-      var t = 'Кабинет ' + cabinet + ', день ' + day + (m ? ' (' + m + ')' : '') +
-              (shift ? ', смена ' + shift : '');
-      t += l.length
-        ? '\n\nВместе с Бинкевич Татьяна Эдуардовна:\n' +
-          l.map(function (c) { return '• ' + c.name + (c.shift ? ' — ' + c.shift : ''); }).join('\n')
-        : '\n\nНикто другой не работает в этом кабинете в этот день.';
-      alert(t);
+    var month = S.M[S.cur];
+    var title = 'Кабинет ' + cabinet + ' · день ' + day +
+                (month ? ' (' + month + ')' : '') + (shift ? ' · смена ' + shift : '');
+    openColleaguesModal(title, '<div class="col-empty">Загружаем…</div>');
+
+    A.api.colleagues(month, day, cabinet, shift).then(function (d) {
+      var list = (d && d.colleagues) || [];
+      var html;
+      if (!d) {
+        html = '<div class="col-empty">Не удалось загрузить данные</div>';
+      } else if (d.error && !list.length) {
+        html = '<div class="col-empty">' + esc(d.error) + '</div>';
+      } else if (list.length) {
+        html = '<div class="col-empty">Вместе с Бинкевич Татьяна Эдуардовна:</div>' +
+          list.map(function (c) {
+            return '<div class="col-row"><span class="col-name">' + esc(c.name) + '</span>' +
+                   (c.shift ? '<span class="col-shift">' + esc(c.shift) + '</span>' : '') +
+                   '</div>';
+          }).join('');
+      } else {
+        html = '<div class="col-empty">Никто другой не работает в этом кабинете в этот день.</div>';
+      }
+      var el = document.getElementById('colleagues-list');
+      if (el) el.innerHTML = html;
     });
   }
 
@@ -193,6 +221,11 @@
 
   function bind(root) {
     if (root) root.addEventListener('click', onTableClick, false);
+    /* модалка коллег: крестик/подложка закрывают */
+    var cl = document.getElementById('colleagues-close');
+    if (cl) cl.onclick = closeColleaguesModal;
+    var cm = document.getElementById('colleagues-modal');
+    if (cm) cm.onclick = function (e) { if (e.target === cm) closeColleaguesModal(); };
   }
 
   A.calendar = {
@@ -200,6 +233,7 @@
     renderTracking: renderTracking,
     updateMoneyInfo: updateMoneyInfo,
     showColleagues: showColleagues,
+    closeColleaguesModal: closeColleaguesModal,
     bind: bind
   };
 })(window.APP = window.APP || {});

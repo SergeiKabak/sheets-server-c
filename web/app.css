@@ -109,3 +109,14 @@ body[data-theme='dark'] .cal-d.done { background: #1c3325; border-color: #2e5b3d
 .trk-box .cancel { background: #777; color: #fff }
 .trk-box button:disabled { opacity: .5 }
 .trk-err { min-height: 18px; margin-top: 8px; font-size: 13px; color: #C62828 }
+
+/* Список коллег в кабинете (в том же стиле, что и диалог времени) */
+.col-list { display: flex; flex-direction: column; gap: 6px; max-height: 55vh; overflow-y: auto }
+.col-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+}
+.col-name { font-weight: 600; font-size: 14px }
+.col-shift { font-size: 13px; font-weight: 600; color: #1a73e8; white-space: nowrap }
+.col-empty { font-size: 14px; opacity: .85; padding: 4px 0 }
+body[data-theme='dark'] .col-shift { color: #64b4ff }

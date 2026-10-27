@@ -44,10 +44,6 @@
       return json('/api/tracking/days' + q({ month: month }));
     },
 
-    trackingSummary: function () {
-      return json('/api/tracking/summary');
-    },
-
     clock: function (action) {
       return json('/api/tracking/clock' + q({ action: action }), { method: 'POST' });
     },
