@@ -588,3 +588,76 @@ int sb_time_days_json(const char *rows_json, char *out, size_t outcap) {
     if (o == (size_t)-1) { out[0] = '\0'; return -1; }
     return 0;
 }
+
+/* ================= Этап 4: восстановление БД из Google ================= */
+
+int sb_time_restore(const char *days_json, int *errors) {
+    if (errors) *errors = 0;
+    if (!sb_on || !days_json) return -1;
+
+    cJSON *resp = cJSON_Parse(days_json);
+    if (!resp) { if (errors) (*errors)++; return -1; }
+    cJSON *month = cJSON_GetObjectItemCaseSensitive(resp, "month");
+    cJSON *days  = cJSON_GetObjectItemCaseSensitive(resp, "days");
+    if (!cJSON_IsString(month) || !month->valuestring || !cJSON_IsObject(days)) {
+        cJSON_Delete(resp);
+        if (errors) (*errors)++;
+        return -1;
+    }
+    char mt[64], mlog[64];
+    jesc(mt, sizeof(mt), month->valuestring);
+    snprintf(mlog, sizeof(mlog), "%s", month->valuestring);
+
+    /* батч: 31 день * ~512 байт + запас */
+    size_t cap = 32768;
+    char *body = malloc(cap);
+    if (!body) { cJSON_Delete(resp); if (errors) (*errors)++; return -1; }
+    size_t len = 0;
+    body[len++] = '[';
+
+    int n = 0;
+    cJSON *it = NULL;
+    cJSON_ArrayForEach(it, days) {
+        if (!it->string || !*it->string || !cJSON_IsObject(it)) continue;
+        int day = atoi(it->string);
+        if (day < 1 || day > 31) continue;
+
+        cJSON *ji = cJSON_GetObjectItemCaseSensitive(it, "in");
+        cJSON *jo = cJSON_GetObjectItemCaseSensitive(it, "out");
+        cJSON *jh = cJSON_GetObjectItemCaseSensitive(it, "hours");
+        cJSON *js = cJSON_GetObjectItemCaseSensitive(it, "sum");
+        char in_j[64], out_j[64];
+        jesc(in_j, sizeof(in_j), cJSON_IsString(ji) && ji->valuestring ? ji->valuestring : "");
+        jesc(out_j, sizeof(out_j), cJSON_IsString(jo) && jo->valuestring ? jo->valuestring : "");
+        /* в ответе Google часы/сумма — строки «7.17」/""; колонки БД numeric */
+        char hbuf[64] = "null", sbuf[64] = "null";
+        if (cJSON_IsString(jh) && is_num_str(jh->valuestring))
+            snprintf(hbuf, sizeof(hbuf), "%s", jh->valuestring);
+        if (cJSON_IsString(js) && is_num_str(js->valuestring))
+            snprintf(sbuf, sizeof(sbuf), "%s", js->valuestring);
+
+        char row[512];
+        int w = snprintf(row, sizeof(row),
+                         "%s{\"month\":\"%s\",\"day\":%d,\"t_in\":\"%s\",\"t_out\":\"%s\","
+                         "\"hours\":%s,\"amount\":%s}",
+                         n ? "," : "", mt, day, in_j, out_j, hbuf, sbuf);
+        if (w < 0 || len + (size_t)w + 2 >= cap) break;
+        memcpy(body + len, row, (size_t)w);
+        len += (size_t)w;
+        n++;
+    }
+    cJSON_Delete(resp);
+    body[len++] = ']';
+    body[len] = '\0';
+
+    if (n == 0) { free(body); return 0; }   /* дней нет — запрос не нужен */
+
+    int st = sb_call("POST", "/time_entries", body);
+    free(body);
+    if (st < 200 || st > 299) {
+        fprintf(stderr, "[supabase] time restore %s -> HTTP %d\n", mlog, st);
+        if (errors) (*errors)++;
+        return -1;
+    }
+    return n;
+}

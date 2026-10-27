@@ -25,6 +25,9 @@
 #include "supabase.h"
 
 #define CACHE_TTL 60
+/* Этап 4: раз в сутки зеркалим time_entries из Google-кэшей (восстановление
+   БД после удаления/пересоздания проекта Supabase) */
+#define TIME_RESTORE_TTL (24 * 3600)
 #define BUFFER_SIZE (512 * 1024)
 #define MAX_SHEETS 50
 #define MAX_SHEET_NAME 128
@@ -1620,6 +1623,32 @@ static void background_updater(void) {
             for (int i = 0; i < c && i < MAX_MONTHS; i++) labels[lc++] = mo[i].title;
             int tn = tracking_cache_refresh(labels, lc);
             if (tn >= 0) fprintf(stderr, "[updater] tracking cache months: %d\n", tn);
+        }
+
+        /* Этап 4: раз в сутки (и сразу при старте) зеркалим time_entries из
+           свежих кэшей дней Google: Google — источник истины, БД восстановится
+           сама, если проект Supabase пересоздали. Без лишних запросов к Google
+           — берём только что обновлённые файлы кэша. */
+        if (sb_enabled() && c > 0) {
+            static time_t last_restore = 0;
+            if (time(NULL) - last_restore >= TIME_RESTORE_TTL) {
+                last_restore = time(NULL);
+                int days_done = 0, months_done = 0, errs = 0;
+                for (int i = 0; i < c; i++) {
+                    char js[16384];
+                    if (tracking_days_cached_json(mo[i].title, js, sizeof(js)) != 0)
+                        continue;
+                    int e = 0;
+                    int n = sb_time_restore(js, &e);
+                    if (n > 0) { days_done += n; months_done++; }
+                    errs += e;
+                }
+                fprintf(stderr, "[sync] supabase time restore: months=%d days=%d errors=%d\n",
+                        months_done, days_done, errs);
+                if (days_done || errs)
+                    sb_log("time_restore", "", days_done, errs == 0,
+                           errs ? "HTTP error при восстановлении time_entries" : "");
+            }
         }
         free_months(mo, c);
 

@@ -88,4 +88,12 @@ int sb_time_upsert(const char *month_tab, int day,
    Возвращает 0 (объект, возможно "{}"), -1 при ошибке разбора. */
 int sb_time_days_json(const char *rows_json, char *out, size_t outcap);
 
+/* Этап 4: восстановление time_entries из ответа дней Google (кач кэша).
+   Месяц берётся из поля "month" самого JSON. Дни зеркалируются одним
+   batch-UPSERT'ом (merge-duplicates) — защита от удаления/потери проекта
+   Supabase: БД сама восстанавливается из Google-данных.
+   Возвращает число дней в батче (0 — дней нет, запрос не делался),
+   -1 — ошибка (разбор/HTTP); *errors (не NULL) — счётчик ошибок. */
+int sb_time_restore(const char *days_json, int *errors);
+
 #endif /* SUPABASE_H */
