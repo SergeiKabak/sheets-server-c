@@ -21,7 +21,8 @@
 #include <stdarg.h>
 #include <sys/stat.h>
 #include "http.h"
-#include "http.h"
+#include "cJSON.h"
+#include "supabase.h"
 
 static double atof_comm(const char *s) {
     if (!s) return 0.0;
@@ -1310,6 +1311,69 @@ static void trk_reply(int fd, const char *status, const char *body) {
     write(fd, body, strlen(body));
 }
 
+/* ==== Этап 3 плана Supabase: учёт времени в time_entries ==== */
+
+/* cJSON-слияние: дни из fresh_json перекрывают дни объекта "days" в ответе. */
+static int trk_merge_days(char *out, size_t cap, const char *fresh_json) {
+    cJSON *resp = cJSON_Parse(out);
+    if (!resp) return -1;
+    cJSON *days = cJSON_GetObjectItemCaseSensitive(resp, "days");
+    cJSON *fresh = cJSON_Parse(fresh_json);
+    if (!cJSON_IsObject(days) || !cJSON_IsObject(fresh)) {
+        cJSON_Delete(fresh);
+        cJSON_Delete(resp);
+        return -1;
+    }
+    cJSON *it = NULL;
+    cJSON_ArrayForEach(it, fresh) {
+        if (!it->string || !*it->string) continue;
+        cJSON_DeleteItemFromObjectCaseSensitive(days, it->string);
+        cJSON *dup = cJSON_Duplicate(it, 1);
+        if (dup) cJSON_AddItemToObject(days, it->string, dup);
+    }
+    cJSON_Delete(fresh);
+
+    char *printed = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    if (!printed) return -1;
+    int rc = -1;
+    size_t plen = strlen(printed);
+    if (plen < cap) { memcpy(out, printed, plen + 1); rc = 0; }
+    free(printed);
+    return rc;
+}
+
+/* Накладывает дни из time_entries поверх дней из кэша/Google:
+   БД даёт свежие отметки (write-through), кэш — историю (записи до этапа 3).
+   Недоступность БД игнорируется — работает прежний источник. */
+static void trk_merge_time_db(const char *tab, char *out, size_t cap) {
+    if (!sb_enabled() || !tab || !*tab) return;
+    char *et = url_encode(tab);
+    if (!et) return;
+    char path[600];
+    snprintf(path, sizeof(path),
+             "/time_entries?month=eq.%s&select=day,t_in,t_out,hours,amount&order=day",
+             et);
+    free(et);
+    int st = 0;
+    char *body = sb_get(path, &st);
+    if (!body || st < 200 || st > 299) { free(body); return; }
+    char fresh[16384];
+    int ok = (sb_time_days_json(body, fresh, sizeof(fresh)) == 0);
+    free(body);
+    if (!ok || strcmp(fresh, "{}") == 0) return;
+    trk_merge_days(out, cap, fresh);
+}
+
+/* Write-through: после УСПЕШНОЙ записи в Google дублируем день в Supabase.
+   Ошибка БД не меняет ответ клиенту — только лог в sb_time_upsert(). */
+static void sb_write_time_day(const char *tab, int day,
+                              const char *in_t, const char *out_t,
+                              const char *hours, const char *sum) {
+    if (!sb_enabled()) return;
+    sb_time_upsert(tab, day, in_t, out_t, hours, sum);
+}
+
 /* POST /api/tracking/clock?action=in|out
    Тело: initData=... (application/x-www-form-urlencoded) */
 /* Выполняет отметку прихода/ухода. Возвращает HTTP-код (200/400/409/500),
@@ -1418,6 +1482,7 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
             en ? en : "", date, time_s);
         free(en);
         trk_log("CLOCK IN: %s date=%s time=%s", name, date, time_s);
+        sb_write_time_day(g_current_sheet, atoi(date), time_s, "", "", "");
 
     } else if (strcmp(action, "out") == 0) {
         if (date_row < 0 || cell_empty(rows.row[date_row].cell[1])) {
@@ -1475,6 +1540,9 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
         free(en);
         trk_log("CLOCK OUT: %s date=%s time=%s hours=%s sum=%s",
                 name, date, time_s, hours_buf, sum_buf);
+        sb_write_time_day(g_current_sheet, atoi(date),
+                          rows.row[date_row].cell[1] ? rows.row[date_row].cell[1] : "",
+                          time_s, hours_buf, sum_buf);
 
     } else {
         snprintf(out, cap, "{\"ok\":false,\"error\":\"неизвестное действие\"}");
@@ -1656,11 +1724,15 @@ int tracking_days_json(const char *month, char *out, size_t cap) {
         return 400;
     }
     if (trk_cache_read(tab, out, cap, TRK_CACHE_TTL) == 0) {
+        trk_merge_time_db(tab, out, cap);
         return 200;
     }
 
     int code = tracking_days_build(month, out, cap);
-    if (code == 200) trk_cache_write(tab, out);
+    if (code == 200) {
+        trk_cache_write(tab, out);
+        trk_merge_time_db(tab, out, cap);
+    }
     return code;
 }
 
@@ -1915,6 +1987,7 @@ int tracking_fill_day(const char *month, int day, const char *in_time,
     free(en);
     trk_log("FILL: %s date=%s in=%s out=%s hours=%s sum=%s",
             name, date, norm_in, norm_out, hours_buf, sum_buf);
+    sb_write_time_day(tab, day, norm_in, norm_out, hours_buf, sum_buf);
     code = 200;
 
 fill_finish:

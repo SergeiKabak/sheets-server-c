@@ -10,6 +10,42 @@
 
 #include "tracking.c"
 
+/* ---- заглушки http.c для supabase.c (http.c в эту сборку не входит) ---- */
+static int g_h_status = 200;
+static char *g_h_body = NULL;
+static int g_h_gets = 0;
+static char g_last_h_url[1024];
+
+char *url_encode(const char *s) {
+    if (!s) return NULL;
+    size_t len = strlen(s);
+    char *out = malloc(len * 3 + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            out[o++] = c;
+        } else {
+            o += snprintf(out + o, 4, "%%%02X", c);
+        }
+    }
+    out[o] = '\0';
+    return out;
+}
+
+char *http_request_h(const char *method, const char *url,
+                     const char *content_type, const char *body,
+                     const char *const *extra, int *status) {
+    (void)method; (void)content_type; (void)body; (void)extra;
+    g_last_h_url[0] = '\0';
+    if (url) snprintf(g_last_h_url, sizeof(g_last_h_url), "%s", url);
+    g_h_gets++;
+    if (status) *status = g_h_status;
+    return g_h_body ? strdup(g_h_body) : NULL;
+}
+
 static int g_status;
 static char *g_last_put = NULL;
 static char *g_last_put_url = NULL;
@@ -312,6 +348,43 @@ int main(int argc, char **argv) {
     check(p1 && strcmp(p1, "07:30") == 0, "query: параметр in найден");
     check(!p2, "query: in не находится внутри min");
     free(p1); free(p2);
+
+/* ==== Этап 3: слияние time_entries (Supabase) поверх кэша Google ==== */
+    setenv("SUPABASE_URL", "https://db.test", 1);
+    setenv("SUPABASE_SECRET_KEY", "test-key", 1);
+    unsetenv("SUPABASE_SYNC");
+    sb_init();               /* sb_on = 1 — чтение пойдёт в мок http_request_h */
+    g_h_status = 200;
+    g_h_gets = 0;
+    g_h_body =
+        "[{\"day\":6,\"t_in\":\"08:00\",\"t_out\":\"15:00\",\"hours\":7.0,\"amount\":3500.00},"
+        "{\"day\":9,\"t_in\":\"10:00\",\"t_out\":\"11:30\",\"hours\":1.5,\"amount\":700.0},"
+        "{\"day\":10,\"t_in\":\"09:00\",\"t_out\":\"\",\"hours\":null,\"amount\":null}]";
+    code = tracking_days_json("Октябрь 2026", out, sizeof(out));
+    check(code == 200, "merge: ответ собран");
+    check(g_h_gets == 1 &&
+          strstr(g_last_h_url, "/rest/v1/time_entries?month=eq.10.2026") != NULL,
+          "merge: запрос в time_entries (10.2026)");
+    /* день 6 перекрыт данными БД (в Google там был незавершённый день) */
+    check(strstr(out, "\"6\":{\"in\":\"08:00\",\"out\":\"15:00\","
+                      "\"hours\":\"7.00\",\"sum\":\"3500.00\"}") != NULL,
+          "merge: день 6 перекрыт из time_entries");
+    /* день 5 остался из кэша/Google — БД его не трогала */
+    check(strstr(out, "\"5\":{\"in\":\"07:30\",\"out\":\"14:40\"") != NULL,
+          "merge: день 5 из кэша сохранён");
+    /* новый день 9 добавлен из БД */
+    check(strstr(out, "\"9\":{\"in\":\"10:00\"") != NULL,
+          "merge: день 9 добавлен из БД");
+    /* частичный день 10 — в формате Google (4 поля, пустые часы/сумма) */
+    check(strstr(out, "\"10\":{\"in\":\"09:00\",\"out\":\"\","
+                      "\"hours\":\"\",\"sum\":\"\"}") != NULL,
+          "merge: частичный день 10 в формате Google");
+
+    /* недоступная БД не ломает чтение — работаем на кэше */
+    g_h_status = 500;
+    code = tracking_days_json("Октябрь 2026", out, sizeof(out));
+    check(code == 200, "merge: HTTP 500 от БД -> читаем на кэше");
+    check(strstr(out, "\"5\":{\"in\":\"07:30\"") != NULL, "merge: кэш цел после ошибки БД");
 
     printf(fails ? "\nFAILED: %d\n" : "\nALL TESTS PASSED\n", fails);
     return fails ? 1 : 0;

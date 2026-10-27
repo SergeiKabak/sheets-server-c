@@ -135,7 +135,32 @@ int main(void) {
     assert(!strcmp(cj, "[{\"name\":\"Яновская Юлия Алексеевна\",\"shift\":\"8:00-14:30\"}]"));
     assert(sb_colleagues_json("[broken", NULL, NULL, NULL, cj, sizeof cj) == -1);
 
-    printf("OK   этап 2: разбор месяца (порядок смен, размер месяца, пустая s2) и коллег (self/дедуп/фильтр)\n");
+    /* ---------- Этап 3: time_entries ---------- */
+    const char *trows =
+        "[{\"day\":5,\"t_in\":\"07:30\",\"t_out\":\"14:40\",\"hours\":7.17,\"amount\":3585.00},"
+        "{\"day\":6,\"t_in\":\"08:00\",\"t_out\":\"\",\"hours\":null,\"amount\":null},"
+        "{\"day\":9,\"t_in\":\"10:00\",\"t_out\":\"11:30\",\"hours\":1.5,\"amount\":700.0},"
+        "{\"day\":40,\"t_in\":\"10:00\",\"t_out\":\"11:00\",\"hours\":1.0,\"amount\":1.0}]";
+    char dj[4096];
+    assert(sb_time_days_json(trows, dj, sizeof dj) == 0);
+    /* формат в точности как tracking_days_build: 4 поля, числа -> "%.2f" */
+    assert(!strcmp(dj,
+        "{\"5\":{\"in\":\"07:30\",\"out\":\"14:40\",\"hours\":\"7.17\",\"sum\":\"3585.00\"},"
+        "\"6\":{\"in\":\"08:00\",\"out\":\"\",\"hours\":\"\",\"sum\":\"\"},"
+        "\"9\":{\"in\":\"10:00\",\"out\":\"11:30\",\"hours\":\"1.50\",\"sum\":\"700.00\"}}"));
+    assert(sb_time_days_json("[]", dj, sizeof dj) == 0 && !strcmp(dj, "{}"));
+    assert(sb_time_days_json("[broken", dj, sizeof dj) == -1);
+    assert(sb_time_days_json(NULL, dj, sizeof dj) == -1);
+
+    /* запись: выключена/некорректный день -> 0 без сетевых вызовов;
+       на недоступной базе -> ошибка (0), но не падение */
+    assert(sb_time_upsert("10.2026", 0, "07:30", "14:40", "7.17", "3585.00") == 0);
+    assert(sb_time_upsert("", 5, "07:30", "14:40", NULL, NULL) == 0);
+    assert(sb_time_upsert("10.2026", 5, "07:30", "14:40", "7.17", "3585.00") == 0);
+    assert(sb_time_upsert("10.2026", 6, "08:00", "", NULL, NULL) == 0);
+
+    printf("OK   этап 2: разбор месяца и коллег\n");
+    printf("OK   этап 3: формат time_entries (паритет с Google), ошибка записи без падения\n");
     printf("ALL TESTS PASSED\n");
     return 0;
 }

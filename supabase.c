@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <ctype.h>
 #include <time.h>
 
 #include "cJSON.h"
@@ -510,4 +511,80 @@ int sb_colleagues_json(const char *rows_json, const char *self,
     o = addf(out, outcap, o, "]");
     if (o == (size_t)-1) { out[0] = '\0'; return -1; }
     return (int)o;
+}
+
+/* ================= Этап 3: учёт времени (time_entries) ================= */
+
+/* «7.17» — допустимо как число; пусто/с запятой/мусор — нет */
+static int is_num_str(const char *s) {
+    if (!s || !*s) return 0;
+    for (const char *p = s; *p; p++)
+        if (!isdigit((unsigned char)*p) && *p != '.' && *p != '-') return 0;
+    return 1;
+}
+
+int sb_time_upsert(const char *month_tab, int day,
+                   const char *in_t, const char *out_t,
+                   const char *hours, const char *sum) {
+    if (!sb_on || !month_tab || !*month_tab || day < 1 || day > 31) return 0;
+    char mt[64], mi[32], mo[32];
+    jesc(mt, sizeof(mt), month_tab);
+    jesc(mi, sizeof(mi), in_t ? in_t : "");
+    jesc(mo, sizeof(mo), out_t ? out_t : "");
+    /* колонки numeric: не-число -> null (не уронит каст на PostgREST) */
+    char hbuf[64] = "null", sbuf[64] = "null";
+    if (is_num_str(hours)) snprintf(hbuf, sizeof(hbuf), "%s", hours);
+    if (is_num_str(sum))   snprintf(sbuf, sizeof(sbuf), "%s", sum);
+    char body[1024];
+    snprintf(body, sizeof(body),
+             "{\"month\":\"%s\",\"day\":%d,\"t_in\":\"%s\",\"t_out\":\"%s\","
+             "\"hours\":%s,\"amount\":%s}",
+             mt, day, mi, mo, hbuf, sbuf);
+    int st = sb_call("POST", "/time_entries", body);
+    if (st < 200 || st > 299)
+        fprintf(stderr, "[supabase] time upsert %s day=%d -> HTTP %d\n",
+                month_tab, day, st);
+    return st;
+}
+
+int sb_time_days_json(const char *rows_json, char *out, size_t outcap) {
+    if (!out || outcap < 8) return -1;
+    out[0] = '\0';
+    cJSON *arr = rows_json ? cJSON_Parse(rows_json) : NULL;
+    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return -1; }
+
+    size_t o = addf(out, outcap, 0, "{");
+    int size = cJSON_GetArraySize(arr), n = 0;
+    for (int i = 0; i < size; i++) {
+        cJSON *it = cJSON_GetArrayItem(arr, i);
+        cJSON *jd = it ? cJSON_GetObjectItemCaseSensitive(it, "day") : NULL;
+        cJSON *ji = it ? cJSON_GetObjectItemCaseSensitive(it, "t_in") : NULL;
+        cJSON *jo = it ? cJSON_GetObjectItemCaseSensitive(it, "t_out") : NULL;
+        cJSON *jh = it ? cJSON_GetObjectItemCaseSensitive(it, "hours") : NULL;
+        cJSON *ja = it ? cJSON_GetObjectItemCaseSensitive(it, "amount") : NULL;
+        if (!cJSON_IsNumber(jd)) continue;
+        int day = (int)jd->valuedouble;
+        if (day < 1 || day > 31) continue;
+
+        char in_j[64], out_j[64], h_j[64], s_j[64];
+        jesc(in_j, sizeof(in_j), cJSON_IsString(ji) && ji->valuestring ? ji->valuestring : "");
+        jesc(out_j, sizeof(out_j), cJSON_IsString(jo) && jo->valuestring ? jo->valuestring : "");
+        /* формат tracking_days_build: часы/сумма — строки, у пустых — "" */
+        char hbuf[32] = "", sbuf[32] = "";
+        if (cJSON_IsNumber(jh)) snprintf(hbuf, sizeof(hbuf), "%.2f", jh->valuedouble);
+        if (cJSON_IsNumber(ja)) snprintf(sbuf, sizeof(sbuf), "%.2f", ja->valuedouble);
+        jesc(h_j, sizeof(h_j), hbuf);
+        jesc(s_j, sizeof(s_j), sbuf);
+        o = addf(out, outcap, o,
+                 "%s\"%d\":{\"in\":\"%s\",\"out\":\"%s\",\"hours\":\"%s\",\"sum\":\"%s\"}",
+                 n ? "," : "", day, in_j, out_j, h_j, s_j);
+        if (o == (size_t)-1) break;
+        n++;
+    }
+    cJSON_Delete(arr);
+
+    if (o == (size_t)-1) { out[0] = '\0'; return -1; }
+    o = addf(out, outcap, o, "}");
+    if (o == (size_t)-1) { out[0] = '\0'; return -1; }
+    return 0;
 }

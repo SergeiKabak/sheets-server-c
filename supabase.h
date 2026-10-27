@@ -72,4 +72,20 @@ int sb_colleagues_json(const char *rows_json, const char *self,
                        const char *shift, SBShiftFilter filter,
                        char *out, size_t outcap);
 
+/* ---------------- Этап 3: учёт времени (time_entries) ---------------- */
+
+/* UPSERT дня в time_entries (merge-duplicates по PK month+day).
+   hours/sum — строки «7.17»/«3585.00» или NULL/"" (частичная запись).
+   Возвращает HTTP-код (2xx — успех), 0 — выключено/сетевая ошибка. */
+int sb_time_upsert(const char *month_tab, int day,
+                   const char *in_t, const char *out_t,
+                   const char *hours, const char *sum);
+
+/* Строки GET /time_entries -> JSON-объект дней Mini App, в точности
+   как их строит tracking_days_build (всегда 4 поля):
+   {"5":{"in":"07:30","out":"14:40","hours":"7.17","sum":"3585.00"},
+    "6":{"in":"08:00","out":"","hours":"","sum":""}}
+   Возвращает 0 (объект, возможно "{}"), -1 при ошибке разбора. */
+int sb_time_days_json(const char *rows_json, char *out, size_t outcap);
+
 #endif /* SUPABASE_H */
