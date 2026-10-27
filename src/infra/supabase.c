@@ -457,6 +457,23 @@ int sb_reminder_add_kind(long long chat_id, const char *kind, long long remind_a
                           body,
                           "Prefer: resolution=ignore-duplicates,return=minimal");
     free(body);
+
+    /* Старая схема (без колонки kind и уникального индекса) — 400/404.
+       Разовые напоминания должны работать и на ней: вставляем без kind. */
+    if (st == 400 || st == 404) {
+        StrBuf sb2;
+        sbuf_init(&sb2);
+        sbuf_appendf(&sb2, "{\"chat_id\":%lld,\"remind_at\":\"%s\",\"text\":",
+                     chat_id, iso);
+        sbuf_append_json_string(&sb2, text ? text : "");
+        sbuf_append(&sb2, "}");
+        char *body2 = sbuf_take(&sb2);
+        if (body2) {
+            st = sb_call("POST", "/reminders", body2);
+            free(body2);
+        }
+    }
+
     if (st < 200 || st > 299)
         fprintf(stderr, "[remind] add -> HTTP %d (таблица reminders создана?)\n", st);
     return st;
