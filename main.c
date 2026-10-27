@@ -17,6 +17,8 @@
 #include <fcntl.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 #include "tracking.h"
 #include "http.h"
@@ -980,355 +982,8 @@ static void url_decode(char *dst, size_t dstcap, const char *src) {
 }
 
 /* ================================================================
- * Mini App: HTML + API
+ * Mini App: статические файлы (web/) + API
  * ================================================================ */
-static void serve_miniapp(int fd) {
-    const char html_prefix[] =
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no'>"
-        "<title>График смен</title>"
-        "<style>"
-        ":root{--bg:#f5f5f5;--fg:#222;--card:#fff;--border:#e0e0e0;--head:#4CAF50;--head-fg:#fff;--name-bg:#f1f8e9;--stripe:#f9f9f9}"
-        "body.dark,body[data-theme='dark']{--bg:#1e1e1e;--fg:#e0e0e0;--card:#2d2d2d;--border:#444;--head:#2E7D32;--head-fg:#fff;--name-bg:#1b5e20;--stripe:#3a3a3a}"
-        "body{margin:0;font-family:DejaVu Sans,Arial,sans-serif;background:var(--bg);color:var(--fg)}"
-        ".c{padding:10px}"
-        ".m{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}"
-        ".b{padding:8px 12px;border:none;border-radius:6px;background:var(--head);color:var(--head-fg);font-size:14px;cursor:pointer}"
-        ".b:hover{opacity:.85}"
-        ".b.active{outline:3px solid #FF9800;outline-offset:2px;background:#FF9800;color:#fff;font-weight:600}"
-        ".t{overflow-x:auto;background:var(--card);border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.1)}"
-        "table{border-collapse:collapse;width:100%;min-width:520px}"
-        "th,td{border:1px solid var(--border);padding:8px;text-align:center;font-size:14px}"
-        "thead th{background:var(--head);color:var(--head-fg);font-weight:bold}"
-        ".cal-info{display:flex;flex-wrap:wrap;gap:6px 14px;padding:10px 10px 6px;align-items:center;font-size:13px}"
-        ".cal-title{font-weight:bold;font-size:15px}"
-        ".cal-legend{opacity:.9}"
-        ".cal{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;padding:4px 10px 10px}"
-        ".cal-h{text-align:center;font-weight:bold;font-size:12px;padding:6px 2px;border-radius:4px;background:var(--head);color:var(--head-fg)}"
-        ".cal-h.we{background:#C62828}"
-        ".cal-d{position:relative;min-height:82px;box-sizing:border-box;border:1px solid var(--border);border-radius:6px;background:var(--card);padding:6px 4px 7px;display:flex;flex-direction:column;align-items:center;gap:4px;overflow:hidden}"
-        ".cal-d.pad{visibility:hidden}"
-        ".cal-d[data-has]{cursor:pointer}"
-        ".cal-d.we{background:#ffebee;border-color:#f3c6c6}"
-        ".cal-d.we .cal-num{color:#C62828}"
-        ".cal-d.we-work::after{content:'раб.';position:absolute;right:3px;bottom:2px;font-size:9px;font-weight:bold;color:#2E7D32}"
-        ".cal-d.done{background:#e8f5e9;border-color:#c8e6c9}"
-        ".cal-today{outline:2px solid #FF9800;outline-offset:-2px}"
-        ".cal-num{font-size:13px;font-weight:bold;line-height:1.2}"
-        ".cal-mark{position:absolute;top:3px;right:4px;color:#2E7D32;font-size:12px;font-weight:bold}"
-        ".cal-cab{display:block;width:100%;box-sizing:border-box;font-size:12px;font-weight:600;line-height:1.2;padding:6px 2px;border-radius:5px;background:rgba(26,115,232,.10);color:#1a73e8;cursor:pointer;text-align:center;user-select:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
-        ".cal-cab:hover{background:rgba(26,115,232,.20)}"
-        ".cal-sum{display:none;font-size:11px;font-weight:bold;color:#2E7D32;letter-spacing:-.2px}"
-        ".cal.show-sum .cal-sum{display:block}"
-        "#trk-money.on{outline:3px solid #FF9800;outline-offset:2px;background:#FF9800}"
-        "body[data-theme='dark'] .cal-cab{background:rgba(100,180,255,.16);color:#64b4ff}"
-        "body[data-theme='dark'] .cal-cab:hover{background:rgba(100,180,255,.28)}"
-        "body[data-theme='dark'] .cal-sum{color:#81c784}"
-        "body[data-theme='dark'] .cal-d.we{background:#3a2424;border-color:#5c3535}"
-        "body[data-theme='dark'] .cal-d.done{background:#1c3325;border-color:#2e5b3d}"
-        "tbody tr:nth-child(even){background:var(--stripe)}"
-        ".n{font-weight:bold;background:var(--name-bg);min-width:180px}"
-        ".x{display:flex;gap:8px;margin-top:12px}"
-        ".x button{flex:1;padding:10px;border:none;border-radius:6px;background:var(--head);color:var(--head-fg);font-size:16px;cursor:pointer}"
-        ".h{display:none}"
-        ".trk{margin-top:16px;padding:12px;background:var(--card);border-radius:8px}"
-        ".trk-banner{display:none;margin-top:10px;padding:12px;border-radius:6px;font-weight:bold;font-size:16px}"
-        ".trk-banner.ok{background:#e8f5e9;color:#2E7D32;border:2px solid #2E7D32}"
-        ".trk-banner.err{background:#ffebee;color:#C62828;border:2px solid #C62828}"
-        ".trk-banner.ok{display:block}"
-        ".trk-banner.err{display:block}"
-        ".trk h3{margin:0 0 10px;font-size:15px}"
-        ".trk .row{display:flex;gap:8px}"
-        ".trk button{flex:1;padding:12px;border:none;border-radius:6px;color:#fff;font-size:15px;cursor:pointer}"
-        ".trk .in{background:#2E7D32}"
-        ".trk .mn{background:#1565C0}"
-        ".trk .out{background:#C62828}"
-        ".trk button:disabled{opacity:.5}"
-        ".trk .st{margin-top:8px;font-size:13px;color:var(--fg);opacity:.8}"
-        ".trk-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100;align-items:center;justify-content:center;padding:16px}"
-        ".trk-modal.open{display:flex}"
-        ".trk-box{background:var(--card);color:var(--fg);border-radius:10px;padding:16px;width:100%;max-width:360px;box-sizing:border-box;box-shadow:0 8px 24px rgba(0,0,0,.35)}"
-        ".trk-box h4{margin:0 0 12px;font-size:16px}"
-        ".trk-box label{display:block;margin:10px 0 4px;font-size:13px;opacity:.8}"
-        ".trk-box input{width:100%;box-sizing:border-box;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:16px}"
-        ".trk-box .row{display:flex;gap:8px;margin-top:14px;align-items:center}"
-        ".trk-box button{flex:1;padding:11px;border:none;border-radius:6px;font-size:15px;cursor:pointer}"
-        ".trk-box .save{background:#2E7D32;color:#fff}"
-        ".trk-box .cancel{background:#777;color:#fff}"
-        ".trk-box button:disabled{opacity:.5}"
-        ".trk-err{min-height:18px;margin-top:8px;font-size:13px;color:#C62828}"
-        "</style>"
-        "<script>"
-        "function applyTheme(){var s='light';if(window.Telegram&&window.Telegram.WebApp&&window.Telegram.WebApp.colorScheme)s=window.Telegram.WebApp.colorScheme;document.body.setAttribute('data-theme',s);}"
-        "function esc(s){if(!s)return '';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}"
-        "function parseMonthTitle(t){"
-        "if(!t)return null;var s=(''+t).trim();"
-        "var m=s.match(/^(\\d{1,2})\\.(\\d{4})$/);if(m)return{m:parseInt(m[1],10),y:parseInt(m[2],10)};"
-        "var NM=['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];"
-        "for(var i=0;i<12;i++){if(s.indexOf(NM[i])===0){var y=s.match(/(\\d{4})/);return {m:i+1,y:y?parseInt(y[1],10):new Date().getFullYear()};}}"
-        "return null;}"
-        "function showTable(d){"
-        "var w=document.getElementById('table');if(!w)return;"
-        "var s1=d.s1||[];var s2=d.s2||[];"
-        "var n=Math.max(s1.length,s2.length,1);"
-        "var days=n>3?n-3:0;"
-        "var sh1=(s1[1]||'').trim(),sh2=(s2[1]||'').trim(),total=s1[n-1]||s2[n-1]||'';"
-        "var pm=parseMonthTitle(d.t);"
-        "var dim=days;"
-        "if(pm){var md=new Date(pm.y,pm.m,0).getDate();if(md>dim)dim=md;}"
-        "var lead=pm?(new Date(pm.y,pm.m-1,1).getDay()+6)%7:0;"
-        "var h='<div class=\"cal-info\">';"
-        "h+='<span class=\"cal-title\">'+esc(d.t||'')+'</span>';"
-        "if(sh1)h+='<span class=\"cal-legend\">Смена 1: <b>'+esc(sh1)+'</b></span>';"
-        "if(sh2)h+='<span class=\"cal-legend\">Смена 2: <b>'+esc(sh2)+'</b></span>';"
-        "if(total)h+='<span class=\"cal-legend\">Всего смен: <b>'+esc(total)+'</b></span>';"
-        "h+='<span class=\"cal-legend\" id=\"cal-money\"></span>';"
-        "h+='</div>';"
-        "h+='<div class=\"cal\">';"
-        "var WD=['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];"
-        "for(var i=0;i<7;i++){h+='<div class=\"cal-h'+(i>4?' we':'')+'\">'+WD[i]+'</div>';}"
-        "for(var i=0;i<lead;i++)h+='<div class=\"cal-d pad\"></div>';"
-        "CAL_HAS={};"
-        "for(var day=1;day<=dim;day++){"
-        "var c1=(s1[day+1]||'').trim();"
-        "var c2=(s2[day+1]||'').trim();"
-        "var has=!!(c1||c2);if(has)CAL_HAS[day]=1;"
-        "var we=pm?((lead+day-1)%7>4):false;"
-        "h+='<div class=\"cal-d'+(we?' we':'')+(we&&has?' we-work':'')+'\" data-day=\"'+day+'\"'+(has?' data-has=\"1\"':'')+'>';"
-        "h+='<div class=\"cal-num\">'+day+'</div>';"
-        "if(c1)h+='<span class=\"cal-cab\" data-day=\"'+day+'\" data-cabinet=\"'+esc(c1)+'\" data-shift=\"'+esc(sh1)+'\" title=\"'+esc(sh1)+'\">'+esc(c1)+'</span>';"
-        "if(c2)h+='<span class=\"cal-cab\" data-day=\"'+day+'\" data-cabinet=\"'+esc(c2)+'\" data-shift=\"'+esc(c2===c1?'':sh2)+'\" title=\"'+esc(sh2)+'\">'+esc(c2)+'</span>';"
-        "h+='<span class=\"cal-sum\"></span>';"
-        "h+='</div>';"
-        "}"
-        "var tail=(lead+dim)%7;if(tail){for(var i=tail;i<7;i++)h+='<div class=\"cal-d pad\"></div>';}"
-        "h+='</div>';"
-        "w.innerHTML=h;w.classList.remove('h');"
-        "w.querySelectorAll('.cal-cab').forEach(function(el){"
-        "el.onclick=function(e){if(e&&e.stopPropagation)e.stopPropagation();"
-        "showColleagues(parseInt(this.dataset.day,10),this.dataset.cabinet,this.dataset.shift);};"
-        "});"
-        "w.querySelectorAll('.cal-d[data-day]').forEach(function(cell){"
-        "cell.onclick=function(){dayAction(parseInt(cell.getAttribute('data-day'),10));};"
-        "});"
-        "trkSelectedMonth=(d.t||M[cur]||'');"
-        "var tk=d.trk;"
-        "if(tk&&tk.ok){TRK=tk.days||{};"
-        "TRK_META={month:tk.month||'',label:tk.label||trkSelectedMonth,today:tk.today||''};"
-        "renderTracking();"
-        "}else{TRK={};TRK_META={};loadTracking(trkSelectedMonth);}"
-        "}"
-        "function showColleagues(day,cabinet,shift){if(!cabinet)return;var m=M[cur];fetch('/api/cabinet?month='+encodeURIComponent(m)+'&cabinet='+encodeURIComponent(cabinet)+'&day='+day+(shift?'&shift='+encodeURIComponent(shift):'')).then(function(r){return r.json();}).then(function(d){var l=d.colleagues||[];var t='Кабинет '+cabinet+', день '+day+(m?' ('+m+')':'')+(shift?', смена '+shift:'');t+=l.length?'\\n\\nВместе с Бинкевич Татьяна Эдуардовна:\\n'+l.map(function(c){return '• '+c.name+(c.shift?' — '+c.shift:'');}).join('\\n'):'\\n\\nНикто другой не работает в этом кабинете в этот день.';alert(t);});}"
-        "var M=[];var cur=-1;var CAL_HAS={};var MONEY_VIEW=false;"
-        "var TRK={},TRK_META={},trkSelectedMonth='',trkPendingDay=0,trkPendingMonth='';"
-        "function pad2(n){return (n<10?'0':'')+n;}"
-        "function shiftTimes(s){"
-        "if(!s)return ['',''];"
-        "var t=(s+'').replace(/[–—−]/g,'-').replace(/\\s/g,'');"
-        "var m=t.match(/(\\d{1,2}):(\\d{2})-(\\d{1,2}):(\\d{2})/);"
-        "if(!m)return ['',''];"
-        "return [pad2(parseInt(m[1],10))+':'+m[2],pad2(parseInt(m[3],10))+':'+m[4]];"
-        "}"
-        "function dayAllowed(day){"
-        "if(!TRK_META.month||!TRK_META.today)return true;"
-        "var tp=TRK_META.today.split('.'),mp=TRK_META.month.split('.');"
-        "if(tp.length<3||mp.length<2)return true;"
-        "var td=parseInt(tp[0],10),tm=parseInt(tp[1],10),ty=parseInt(tp[2],10);"
-        "var mm=parseInt(mp[0],10),my=parseInt(mp[1],10),d=parseInt(day,10);"
-        "if(my<ty)return true;if(my>ty)return false;"
-        "if(mm<tm)return true;if(mm>tm)return false;"
-        "return d<=td;"
-        "}"
-        "function renderTracking(){"
-        "var cells=document.querySelectorAll('.cal-d[data-day]');"
-        "var td=0;"
-        "if(TRK_META.today&&TRK_META.month){var tp=(''+TRK_META.today).split('.'),mp=(''+TRK_META.month).split('.');"
-        "if(tp.length===3&&mp.length===2&&parseInt(mp[0],10)===parseInt(tp[1],10)&&parseInt(mp[1],10)===parseInt(tp[2],10))td=parseInt(tp[0],10);}"
-        "for(var i=0;i<cells.length;i++){(function(cell){"
-        "var day=parseInt(cell.getAttribute('data-day'),10);"
-        "var old=cell.querySelector('.cal-mark');if(old)old.parentNode.removeChild(old);"
-        "cell.classList.remove('cal-done','cal-today');"
-        "if(td&&day===td)cell.classList.add('cal-today');"
-        "var rec=TRK[day]||null;var done=!!(rec&&rec.in&&rec.out);"
-        "var has=cell.getAttribute('data-has')==='1';"
-        "if(done){"
-        "cell.classList.add('cal-done');"
-        "var mk=document.createElement('span');mk.className='cal-mark';mk.textContent='✓';"
-        "mk.title='Приход '+rec.in+', уход '+rec.out+(rec.hours?', '+rec.hours+' ч.':'');"
-        "cell.appendChild(mk);"
-        "}"
-        "var sumEl=cell.querySelector('.cal-sum');"
-        "if(sumEl){var sv=parseFloat(rec&&rec.sum);sumEl.textContent=(isFinite(sv)&&sv>0)?sv.toFixed(2):'';}"
-        "cell.title=has?(done?'Просмотр отработанного времени':'Тап — внести время за день'):'Смен в этот день нет';"
-        "})(cells[i]);}"
-        "updateMoneyInfo();"
-        "}"
-        "function loadTracking(month){"
-        "if(!month)return;"
-        "fetch('/api/tracking/days?month='+encodeURIComponent(month)).then(function(r){return r.json();})"
-        ".then(function(d){"
-        "if(!d||!d.ok||trkSelectedMonth!==month)return;"
-        "TRK=d.days||{};TRK_META={month:d.month||'',label:d.label||month,today:d.today||''};"
-        "renderTracking();"
-        "}).catch(function(){});"
-        "}"
-        "function dayAction(day){"
-        "if(!CAL_HAS||!CAL_HAS[day]){return;}"
-        "var rec=TRK[day]||null;"
-        "if(rec&&rec.in&&rec.out){"
-        "var t='День '+day+' ('+(TRK_META.label||trkSelectedMonth||'')+'):\\nПриход: '+rec.in+'\\nУход: '+rec.out;"
-        "if(rec.hours)t+='\\nОтработано: '+rec.hours+' ч.';"
-        "if(rec.sum)t+='\\nСумма: '+rec.sum;"
-        "alert(t);return;"
-        "}"
-        "openTrkDialog(day,'','');"
-        "}"
-        "function openTrkDialog(day,cabinet,shift){"
-        "if(!CAL_HAS||!CAL_HAS[day]){trkMsg('В этот день смен нет — время не вносится',false);return;}"
-        "var ex=TRK[day]||null;if(ex&&ex.in&&ex.out){trkMsg('За день '+day+' время уже отмечено: '+ex.in+'–'+ex.out,false);return;}"
-        "trkPendingDay=day;trkPendingMonth=M[cur]||TRK_META.label||'';"
-        "var rec=TRK[day]||{};var st=shiftTimes(shift);"
-        "var i=document.getElementById('trk-in-time'),o=document.getElementById('trk-out-time');"
-        "if(i)i.value=rec.in||st[0]||'';if(o)o.value=rec.out||st[1]||'';"
-        "var t=document.getElementById('trk-modal-title');"
-        "if(t)t.textContent=(cabinet?'Кабинет '+cabinet+', ':'')+'день '+day+' ('+trkPendingMonth+')';"
-        "var e=document.getElementById('trk-modal-err');if(e)e.textContent='';"
-        "var m=document.getElementById('trk-modal');if(m)m.classList.add('open');"
-        "}"
-        "function closeTrkDialog(){"
-        "var m=document.getElementById('trk-modal');if(m)m.classList.remove('open');"
-        "var e=document.getElementById('trk-modal-err');if(e)e.textContent='';"
-        "trkPendingDay=0;trkPendingMonth='';"
-        "}"
-        "function saveTrkDialog(){"
-        "var i=document.getElementById('trk-in-time'),o=document.getElementById('trk-out-time');"
-        "var e=document.getElementById('trk-modal-err'),b=document.getElementById('trk-modal-save');"
-        "var iv=i?i.value:'',ov=o?o.value:'';"
-        "if(!iv||!ov){if(e)e.textContent='Укажите время прихода и ухода.';return;}"
-        "if(!trkPendingDay||!trkPendingMonth){if(e)e.textContent='Не выбран день.';return;}"
-        "if(b)b.disabled=true;if(e)e.textContent='';"
-        "fetch('/api/tracking/fill?month='+encodeURIComponent(trkPendingMonth)+"
-        "'&day='+trkPendingDay+'&in='+encodeURIComponent(iv)+'&out='+encodeURIComponent(ov),"
-        "{method:'POST'}).then(function(r){return r.json();}).then(function(d){"
-        "if(d&&d.ok){"
-        "TRK[trkPendingDay]={in:d.in,out:d.out,hours:d.hours,sum:d.sum};"
-        "renderTracking();closeTrkDialog();"
-        "trkMsg('Записано: '+d.date+', '+d.hours+' ч., '+d.sum,true);"
-        "try{trkStatus();}catch(x){}"
-        "}else if(e){e.textContent=(d&&d.error)?d.error:'Не удалось сохранить';}"
-        "if(b)b.disabled=false;"
-        "}).catch(function(){if(e)e.textContent='Сеть недоступна';if(b)b.disabled=false;});"
-        "}"
-        "function load(i){"
-        "cur=i;showMonths();"
-        "var xhr=new XMLHttpRequest();"
-        "xhr.open('GET','/api/month?name='+encodeURIComponent(M[i]),true);"
-        "xhr.onreadystatechange=function(){"
-        "if(xhr.readyState===4){"
-        "if(xhr.status===200){try{var d=JSON.parse(xhr.responseText);showTable(d);}catch(e){alert('Ошибка JSON');}}"
-        "else{alert('HTTP '+xhr.status);}"
-        "}"
-        "};"
-        "xhr.send();"
-        "}"
-        "function showMonths(){var c=document.getElementById('months');c.innerHTML='';"
-        "M.forEach(function(m,i){var b=document.createElement('button');b.className='b'+(i===cur?' active':'');"
-        "b.textContent=m;b.onclick=function(){load(i);};c.appendChild(b);});}"
-        "function init(){"
-        "applyTheme();"
-        "try{trkInit();}catch(e){var el=document.getElementById('trk-st');if(el)el.textContent='Ошибка: '+e.message;}"
-        "var xhr=new XMLHttpRequest();"
-        "xhr.open('GET','/api/months',true);"
-        "xhr.onreadystatechange=function(){"
-        "if(xhr.readyState===4){"
-        "if(xhr.status===200){"
-        "try{var d=JSON.parse(xhr.responseText);M=d.months||[];"
-        "if(M.length)load(M.length-1);else alert('Нет данных');"
-        "}catch(e){alert('Ошибка JSON');}"
-        "}else{alert('Ошибка сети '+xhr.status);}"
-        "}"
-        "};"
-        "xhr.send();"
-        "}"
-        "function trkMsg(txt,ok){var el=document.getElementById('trk-st');if(el){el.textContent=txt;el.className=ok?'trk-banner ok':'trk-banner err';el.style.display='block';}}"
-        "function tgAlert(m){var tg=window.Telegram&&window.Telegram.WebApp;if(tg&&tg.showAlert){try{tg.showAlert(m);}catch(e){}}}"
-        "function trkPost(action,cb){"
-        "var xhr=new XMLHttpRequest();"
-        "xhr.open('POST','/api/tracking/clock?action='+action,true);"
-        "xhr.setRequestHeader('Content-Type','application/x-www-form-urlencoded');"
-        "xhr.onreadystatechange=function(){"
-        "if(xhr.readyState!==4)return;"
-        "var r;try{r=JSON.parse(xhr.responseText);}catch(e){r={ok:false,error:'Ошибка JSON'};}"
-        "if(r.ok){var msg='Записано! '+(action==='in'?'Приход ':'Уход ')+r.time;"
-        "if(r.hours!==undefined&&r.hours!==null)msg+='\\nОтработано: '+r.hours+' ч.';"
-        "if(r.sum!==undefined&&r.sum!==null&&r.sum!=='')msg+='\\nСумма: '+r.sum;"
-        "trkMsg(msg,true);tgAlert(msg);"
-        "try{if(typeof loadTracking==='function')loadTracking(trkSelectedMonth);}catch(e){}"
-        "}else{var err=r.error||('HTTP '+xhr.status);trkMsg('Ошибка: '+err,false);tgAlert(err);}"
-        "if(cb)cb(r);"
-        "};"
-        "xhr.onerror=function(){var e='Сеть недоступна';trkMsg('Ошибка: '+e,false);tgAlert(e);if(cb)cb({ok:false,error:e});};"
-        "xhr.send('');"
-        "}"
-        "function trkStatus(){"
-        "fetch('/api/tracking/summary').then(function(r){return r.json();}).then(function(dd){"
-        "if(!dd||!dd.ok)return;"
-        "trkMsg('Отработано за '+(dd.month||'')+': '+dd.total_hours+' ч., сумма '+dd.total_sum,true);"
-        "}).catch(function(){trkMsg('Не удалось загрузить статистику',false);});}"
-        "function trkMonthSum(){var s=0;for(var k in TRK){var r=TRK[k];if(r&&r.sum){var v=parseFloat(r.sum);if(isFinite(v))s+=v;}}return s;}"
-        "function updateMoneyInfo(){"
-        "var el=document.getElementById('cal-money');"
-        "if(el){var s=trkMonthSum();el.innerHTML=s>0?('Заработано: <b>'+s.toFixed(2)+'</b>'):'';}"
-        "var cal=document.querySelector('.cal');if(cal)cal.classList.toggle('show-sum',!!MONEY_VIEW);"
-        "var b=document.getElementById('trk-money');if(b)b.classList.toggle('on',!!MONEY_VIEW);"
-        "}"
-        "function trkMoney(){"
-        "MONEY_VIEW=!MONEY_VIEW;"
-        "updateMoneyInfo();"
-        "if(MONEY_VIEW){var s=trkMonthSum();"
-        "trkMsg(s>0?('Заработано за '+(TRK_META.label||trkSelectedMonth||' месяц')+': '+s.toFixed(2)+'. Суммы по дням — в календаре.'):'За этот месяц пока нет отработанных дней',s>0);"
-        "}else{try{trkStatus();}catch(x){trkMsg('Заработок по дням скрыт',true);}}"
-        "}"
-        "function trkInit(){"
-        "var b1=document.getElementById('trk-in'),b2=document.getElementById('trk-out'),bm=document.getElementById('trk-money');"
-        "var sv=document.getElementById('trk-modal-save'),cn=document.getElementById('trk-modal-cancel');"
-        "if(sv)sv.onclick=saveTrkDialog;if(cn)cn.onclick=closeTrkDialog;"
-        "var md=document.getElementById('trk-modal');"
-        "if(md)md.onclick=function(e){if(e.target===md)closeTrkDialog();};"
-        "if(!b1||!b2)return;"
-        "b1.onclick=function(){b1.disabled=true;trkMsg('Сохраняем...',true);trkPost('in',function(){b1.disabled=false;trkStatus();});};"
-        "b2.onclick=function(){b2.disabled=true;trkMsg('Сохраняем...',true);trkPost('out',function(){b2.disabled=false;trkStatus();});};"
-        "if(bm)bm.onclick=trkMoney;"
-        "trkStatus();}"
-
-        "</script>"
-        "</head><body onload='init()'>"
-        "<div class='c'><div id='months' class='m'></div>"
-        "<div id='table' class='t h'></div>"
-        "<div class='trk'><h3>Учёт рабочего времени</h3>"
-        "<div class='row'><button id='trk-in' class='in'>Пришла</button>"
-        "<button id='trk-out' class='out'>Ушла</button></div>"
-        "<div class='row' style='margin-top:8px'><button id='trk-money' class='mn'>Деньги</button></div>"
-        "<div class='st' id='trk-st'></div>"
-        "<div class='st'>Тап по дню — внести время (день со сменой, ещё не отмеченный) или посмотреть отработанное. Тап по кабинету — с кем работаете. Кнопка «Деньги» — заработок по дням в календаре. Выходные сб/вс помечены красным, «раб.» — рабочая смена в выходной.</div></div>"
-        "<div id='trk-modal' class='trk-modal'><div class='trk-box'>"
-        "<h4 id='trk-modal-title'>Отметить время</h4>"
-        "<label for='trk-in-time'>Приход</label><input id='trk-in-time' type='time' step='60'>"
-        "<label for='trk-out-time'>Уход</label><input id='trk-out-time' type='time' step='60'>"
-        "<div id='trk-modal-err' class='trk-err'></div>"
-        "<div class='row'><button id='trk-modal-save' class='save'>Сохранить</button>"
-        "<button id='trk-modal-cancel' class='cancel'>Отмена</button></div>"
-        "</div></div>"
-        "</div></body></html>";
-
-    char header[256];
-    int hlen = snprintf(header, sizeof(header),
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
-        sizeof(html_prefix) - 1);
-    write(fd, header, hlen);
-    write(fd, html_prefix, sizeof(html_prefix) - 1);
-}
-
 static void http_reply(int fd, const char *status, const char *body) {
     char header[256];
     int hlen = snprintf(header, sizeof(header),
@@ -1499,6 +1154,127 @@ static void api_cabinet(int fd, const char *query) {
     free(json);
 }
 
+/* ---- Раздача статики Mini App (web/) ---- */
+#define WEB_CACHE_HTML "no-cache"
+#define WEB_CACHE      "public, max-age=300"
+
+static const char *web_dir(void) {
+    const char *d = getenv("WEB_DIR");
+    return (d && *d) ? d : "web";
+}
+
+/* Только [A-Za-z0-9._-/], без ".." и ведущего "/": защита от path traversal. */
+static int web_path_safe(const char *p) {
+    if (!p || !*p || *p == '/') return 0;
+    for (const char *q = p; *q; q++) {
+        unsigned char c = (unsigned char)*q;
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+                 c == '-' || c == '/';
+        if (!ok) return 0;
+        if (q[0] == '.' && q[1] == '.') return 0;
+    }
+    return 1;
+}
+
+static const char *web_mime(const char *name) {
+    const char *dot = strrchr(name, '.');
+    if (!dot) return "application/octet-stream";
+    if (!strcmp(dot, ".html")) return "text/html; charset=utf-8";
+    if (!strcmp(dot, ".css"))  return "text/css; charset=utf-8";
+    if (!strcmp(dot, ".js"))   return "text/javascript; charset=utf-8";
+    if (!strcmp(dot, ".json")) return "application/json; charset=utf-8";
+    if (!strcmp(dot, ".svg"))  return "image/svg+xml";
+    if (!strcmp(dot, ".ico"))  return "image/x-icon";
+    if (!strcmp(dot, ".png"))  return "image/png";
+    return "application/octet-stream";
+}
+
+/* write() может записать меньше — досылаем целиком. */
+static void write_all(int fd, const void *buf, size_t len) {
+    const char *p = (const char *)buf;
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n < 0) { if (errno == EINTR) continue; return; }
+        p += n;
+        len -= (size_t)n;
+    }
+}
+
+/* Отдаёт файл из web/: Content-Type + ETag + Cache-Control + Connection: close.
+   HTML — без кэша (при деплое сразу новый), css/js — с кэшем на 5 минут.
+   req — исходный запрос: при совпадении If-None-Match с ETag отвечаем
+   304 без тела (повторные открытия не переносят байты файлов). */
+static void serve_file(int fd, const char *rel, const char *cache, const char *req) {
+    if (!web_path_safe(rel)) { http_reply(fd, "400 Bad Request", "Bad Request"); return; }
+
+    char full[1024];
+    int n = snprintf(full, sizeof(full), "%s/%s", web_dir(), rel);
+    if (n <= 0 || n >= (int)sizeof(full)) {
+        http_reply(fd, "414 URI Too Long", "Too Long");
+        return;
+    }
+
+    FILE *fp = fopen(full, "rb");
+    if (!fp) { http_reply(fd, "404 Not Found", "Not Found"); return; }
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); http_reply(fd, "500 Internal Server Error", "read"); return; }
+    long sz = ftell(fp);
+    if (sz < 0 || sz > 4L * 1024 * 1024) {
+        fclose(fp);
+        http_reply(fd, "500 Internal Server Error", "read");
+        return;
+    }
+    rewind(fp);
+
+    char etag[64];
+    struct stat st;
+    if (fstat(fileno(fp), &st) == 0)
+        snprintf(etag, sizeof(etag), "\"%llx-%llx\"",
+                 (unsigned long long)sz, (unsigned long long)st.st_mtime);
+    else
+        snprintf(etag, sizeof(etag), "\"%llx\"", (unsigned long long)sz);
+
+    if (req) {
+        const char *inm = strstr(req, "If-None-Match:");
+        if (inm) {
+            const char *eol = strstr(inm, "\r\n");
+            size_t vlen = eol ? (size_t)(eol - inm) : strlen(inm);
+            if (vlen < 512) {
+                char val[512];
+                memcpy(val, inm, vlen); val[vlen] = '\0';
+                if (strstr(val, etag)) {
+                    char h304[256];
+                    int n304 = snprintf(h304, sizeof(h304),
+                        "HTTP/1.1 304 Not Modified\r\nETag: %s\r\n"
+                        "Cache-Control: %s\r\nConnection: close\r\n\r\n",
+                        etag, cache);
+                    fclose(fp);
+                    write_all(fd, h304, (size_t)n304);
+                    return;
+                }
+            }
+        }
+    }
+
+    char *data = malloc((size_t)sz + 1);
+    if (!data) { fclose(fp); http_reply(fd, "500 Internal Server Error", "oom"); return; }
+    size_t got = fread(data, 1, (size_t)sz, fp);
+    fclose(fp);
+
+    char hdr[512];
+    int hlen = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %zu\r\n"
+        "ETag: %s\r\n"
+        "Cache-Control: %s\r\n"
+        "Connection: close\r\n\r\n",
+        web_mime(rel), got, etag, cache);
+    write_all(fd, hdr, (size_t)hlen);
+    write_all(fd, data, got);
+    free(data);
+}
+
 /* Отправляет web_app кнопку */
 
 /* Отправляет web_app кнопку */
@@ -1578,8 +1354,29 @@ static int handle_conn(int client_fd) {
         return 0;
     }
     if (strcmp(path, "/") == 0) {
-        serve_miniapp(client_fd);
+        serve_file(client_fd, "index.html", WEB_CACHE_HTML, buf);
         return 0;
+    }
+    /* Статика Mini App: /app.css, файлы из js/, /favicon.ico —
+       отдётся из web/ с Cache-Control (браузер не перетаскивает их каждый раз). */
+    {
+        const char *q = strchr(path, '?');
+        size_t plen = q ? (size_t)(q - path) : strlen(path);
+        if (plen == 8 && strncmp(path, "/app.css", 8) == 0) {
+            serve_file(client_fd, "app.css", WEB_CACHE, buf);
+            return 0;
+        }
+        if (plen > 4 && plen < 240 && strncmp(path, "/js/", 4) == 0) {
+            char rel[256];
+            memcpy(rel, path + 1, plen - 1);
+            rel[plen - 1] = '\0';
+            serve_file(client_fd, rel, WEB_CACHE, buf);
+            return 0;
+        }
+        if (plen == 12 && strncmp(path, "/favicon.ico", 12) == 0) {
+            serve_file(client_fd, "favicon.ico", WEB_CACHE, buf);
+            return 0;
+        }
     }
     if (strcmp(path, "/api/months") == 0) {
         api_months(client_fd);

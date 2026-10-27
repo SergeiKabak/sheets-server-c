@@ -18,6 +18,9 @@ WORKDIR /app
 
 COPY --from=builder /build/server_app .
 
+# Статика Mini App (HTML/CSS/JS) — отдаётся бинарником из web/
+COPY --from=builder /build/web ./web
+
 # Переменные окружения (секреты) задаются на Render:
 #   BOT_TOKEN, SPREADSHEET_ID, GOOGLE_API_KEY, FROM_COL, TO_COL, SEARCH_NAME, MINIAPP_URL, PORT
 # Для учёта рабочего времени дополнительно:

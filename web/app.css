@@ -1,0 +1,111 @@
+/* График смен — стили Mini App */
+
+:root {
+  --bg: #f5f5f5; --fg: #222; --card: #fff; --border: #e0e0e0;
+  --head: #4CAF50; --head-fg: #fff;
+}
+body.dark, body[data-theme='dark'] {
+  --bg: #1e1e1e; --fg: #e0e0e0; --card: #2d2d2d; --border: #444;
+  --head: #2E7D32; --head-fg: #fff;
+}
+
+body { margin: 0; font-family: DejaVu Sans, Arial, sans-serif; background: var(--bg); color: var(--fg) }
+.c { padding: 10px }
+.h { display:none }
+
+/* Кнопки месяцев */
+.m { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px }
+.b { padding: 8px 12px; border: none; border-radius: 6px; background: var(--head); color: var(--head-fg); font-size: 14px; cursor: pointer }
+.b:hover { opacity: .85 }
+.b.active { outline: 3px solid #FF9800; outline-offset: 2px; background: #FF9800; color: #fff; font-weight: 600 }
+
+/* Контейнер календаря */
+.t { overflow-x: auto; background: var(--card); border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.1) }
+
+/* Инфоблок месяца */
+.cal-info { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 10px 6px; align-items: center; font-size: 13px }
+.cal-title { font-weight: bold; font-size: 15px }
+.cal-legend { opacity: .9 }
+
+/* Сетка календаря */
+.cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; padding: 4px 10px 10px }
+.cal-h { text-align: center; font-weight: bold; font-size: 12px; padding: 6px 2px; border-radius: 4px; background: var(--head); color: var(--head-fg) }
+.cal-h.we { background: #C62828 }
+
+.cal-d {
+  position: relative; min-height: 82px; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--card);
+  padding: 6px 4px 7px; display: flex; flex-direction: column;
+  align-items: center; gap: 4px; overflow: hidden;
+}
+.cal-d.pad { visibility: hidden }
+.cal-d[data-has] { cursor: pointer }
+.cal-d.we { background: #ffebee; border-color: #f3c6c6 }
+.cal-d.we .cal-num { color: #C62828 }
+.cal-d.we-work::after {
+  content: 'раб.'; position: absolute; right: 3px; bottom: 2px;
+  font-size: 9px; font-weight: bold; color: #2E7D32;
+}
+.cal-d.done { background: #e8f5e9; border-color: #c8e6c9 }
+.cal-today { outline: 2px solid #FF9800; outline-offset: -2px }
+
+.cal-num { font-size: 13px; font-weight: bold; line-height: 1.2 }
+.cal-mark { position: absolute; top: 3px; right: 4px; color: #2E7D32; font-size: 12px; font-weight: bold }
+
+.cal-cab {
+  display: block; width: 100%; box-sizing: border-box;
+  font-size: 12px; font-weight: 600; line-height: 1.2; padding: 6px 2px;
+  border-radius: 5px; background: rgba(26,115,232,.10); color: #1a73e8;
+  cursor: pointer; text-align: center; user-select: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cal-cab:hover { background: rgba(26,115,232,.20) }
+
+.cal-sum { display: none; font-size: 11px; font-weight: bold; color: #2E7D32; letter-spacing: -.2px }
+.cal.show-sum .cal-sum { display: block }
+
+body[data-theme='dark'] .cal-cab { background: rgba(100,180,255,.16); color: #64b4ff }
+body[data-theme='dark'] .cal-cab:hover { background: rgba(100,180,255,.28) }
+body[data-theme='dark'] .cal-sum { color: #81c784 }
+body[data-theme='dark'] .cal-d.we { background: #3a2424; border-color: #5c3535 }
+body[data-theme='dark'] .cal-d.done { background: #1c3325; border-color: #2e5b3d }
+
+/* Учёт рабочего времени */
+.trk { margin-top: 16px; padding: 12px; background: var(--card); border-radius: 8px }
+.trk h3 { margin: 0 0 10px; font-size: 15px }
+.trk .row { display: flex; gap: 8px }
+.trk button { flex: 1; padding: 12px; border: none; border-radius: 6px; color: #fff; font-size: 15px; cursor: pointer }
+.trk .in { background: #2E7D32 }
+.trk .mn { background: #1565C0 }
+.trk .out { background: #C62828 }
+.trk button:disabled { opacity: .5 }
+#trk-money.on { outline: 3px solid #FF9800; outline-offset: 2px; background: #FF9800 }
+.trk .st { margin-top: 8px; font-size: 13px; color: var(--fg); opacity: .8 }
+
+.trk-banner { display: none; margin-top: 10px; padding: 12px; border-radius: 6px; font-weight: bold; font-size: 16px }
+.trk-banner.ok { display: block; background: #e8f5e9; color: #2E7D32; border: 2px solid #2E7D32 }
+.trk-banner.err { display: block; background: #ffebee; color: #C62828; border: 2px solid #C62828 }
+
+/* Модалка ввода времени */
+.trk-modal {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,.55);
+  z-index: 100; align-items: center; justify-content: center; padding: 16px;
+}
+.trk-modal.open { display: flex }
+.trk-box {
+  background: var(--card); color: var(--fg); border-radius: 10px; padding: 16px;
+  width: 100%; max-width: 360px; box-sizing: border-box; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+}
+.trk-box h4 { margin: 0 0 12px; font-size: 16px }
+.trk-box label { display: block; margin: 10px 0 4px; font-size: 13px; opacity: .8 }
+.trk-box input {
+  width: 100%; box-sizing: border-box; padding: 10px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--fg); font-size: 16px;
+}
+.trk-box .row { display: flex; gap: 8px; margin-top: 14px; align-items: center }
+.trk-box button { flex: 1; padding: 11px; border: none; border-radius: 6px; font-size: 15px; cursor: pointer }
+.trk-box .save { background: #2E7D32; color: #fff }
+.trk-box .cancel { background: #777; color: #fff }
+.trk-box button:disabled { opacity: .5 }
+.trk-err { min-height: 18px; margin-top: 8px; font-size: 13px; color: #C62828 }

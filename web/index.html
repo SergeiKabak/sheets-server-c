@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>График смен</title>
+<link rel="stylesheet" href="/app.css">
+<script defer src="/js/util.js"></script>
+<script defer src="/js/state.js"></script>
+<script defer src="/js/api.js"></script>
+<script defer src="/js/calendar.js"></script>
+<script defer src="/js/tracking.js"></script>
+<script defer src="/js/app.js"></script>
+</head>
+<body onload="init()">
+<div class="c">
+  <div id="months" class="m"></div>
+  <div id="table" class="t h"></div>
+
+  <div class="trk">
+    <h3>Учёт рабочего времени</h3>
+    <div class="row"><button id="trk-in" class="in">Пришла</button><button id="trk-out" class="out">Ушла</button></div>
+    <div class="row" style="margin-top:8px"><button id="trk-money" class="mn">Деньги</button></div>
+    <div class="st" id="trk-st"></div>
+    <div class="st">Тап по дню — внести время (день со сменой, ещё не отмеченный) или посмотреть отработанное. Тап по кабинету — с кем работаете. Кнопка «Деньги» — заработок по дням в календаре. Выходные сб/вс помечены красным, «раб.» — рабочая смена в выходной.</div>
+  </div>
+
+  <div id="trk-modal" class="trk-modal">
+    <div class="trk-box">
+      <h4 id="trk-modal-title">Отметить время</h4>
+      <label for="trk-in-time">Приход</label>
+      <input id="trk-in-time" type="time" step="60">
+      <label for="trk-out-time">Уход</label>
+      <input id="trk-out-time" type="time" step="60">
+      <div id="trk-modal-err" class="trk-err"></div>
+      <div class="row">
+        <button id="trk-modal-save" class="save">Сохранить</button>
+        <button id="trk-modal-cancel" class="cancel">Отмена</button>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

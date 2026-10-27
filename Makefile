@@ -12,7 +12,7 @@ TARGET_ARM = sheet
 TARGET_NATIVE = server_app
 SRC = main.c tracking.c cJSON.c http.c
 
-.PHONY: all build run clean
+.PHONY: all build run clean test test-js
 
 all: build
 
@@ -40,6 +40,14 @@ run: build
 	else \
 		./$(TARGET_NATIVE); \
 	fi
+
+# Тесты (C-часть: нужен libcurl с GNU-именем -l:libcurl.so.4, т.е. Linux)
+test:
+	bash tests/run.sh
+
+# Тесты JS-части Mini App (нужны node и jsdom: npm i --no-save jsdom)
+test-js:
+	node tests/test_miniapp.js
 
 clean:
 	rm -f $(TARGET_ARM) $(TARGET_NATIVE)
