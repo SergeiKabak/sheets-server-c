@@ -417,6 +417,94 @@ int sb_time_day_read(const char *month_tab, int day,
     return rc;
 }
 
+/* ================= Напоминания бота ================= */
+
+static void sb_epoch_iso(long long t, char *out, size_t cap) {
+    time_t tt = (time_t)t;
+    struct tm tmv;
+    gmtime_r(&tt, &tmv);
+    strftime(out, cap, "%Y-%m-%dT%H:%M:%SZ", &tmv);
+}
+
+int sb_reminder_add(long long chat_id, long long remind_at, const char *text) {
+    if (!sb_on) return 0;
+
+    char iso[32];
+    sb_epoch_iso(remind_at, iso, sizeof(iso));
+
+    StrBuf sb;
+    sbuf_init(&sb);
+    sbuf_appendf(&sb, "{\"chat_id\":%lld,\"remind_at\":\"%s\",\"text\":",
+                 chat_id, iso);
+    sbuf_append_json_string(&sb, text ? text : "");
+    sbuf_append(&sb, "}");
+    char *body = sbuf_take(&sb);
+    if (!body) return 0;
+
+    int st = sb_call("POST", "/reminders", body);
+    free(body);
+    if (st < 200 || st > 299)
+        fprintf(stderr, "[remind] add -> HTTP %d (таблица reminders создана?)\n", st);
+    return st;
+}
+
+int sb_reminder_due(long long now, SbReminder *out, int max) {
+    if (!sb_on || !out || max <= 0) return 0;
+
+    char iso[32];
+    sb_epoch_iso(now, iso, sizeof(iso));
+    char *ei = url_encode(iso);
+    if (!ei) return 0;
+
+    char path[512];
+    snprintf(path, sizeof(path),
+             "/reminders?select=id,chat_id,text&sent=eq.false"
+             "&remind_at=lte.%s&order=remind_at.asc&limit=%d", ei, max);
+    free(ei);
+
+    int status = 0;
+    char *resp = sb_get(path, &status);
+    if (!resp || status < 200 || status > 299) {
+        free(resp);
+        return 0;
+    }
+
+    cJSON *arr = cJSON_Parse(resp);
+    free(resp);
+    if (!cJSON_IsArray(arr)) { cJSON_Delete(arr); return 0; }
+
+    int n = 0;
+    cJSON *it = NULL;
+    cJSON_ArrayForEach(it, arr) {
+        if (n >= max) break;
+        cJSON *jid = cJSON_GetObjectItemCaseSensitive(it, "id");
+        cJSON *jcid = cJSON_GetObjectItemCaseSensitive(it, "chat_id");
+        cJSON *jtx = cJSON_GetObjectItemCaseSensitive(it, "text");
+        if (!cJSON_IsNumber(jid) || !cJSON_IsNumber(jcid)) continue;
+        out[n].id = (long long)jid->valuedouble;
+        out[n].chat_id = (long long)jcid->valuedouble;
+        snprintf(out[n].text, sizeof(out[n].text), "%s",
+                 cJSON_IsString(jtx) ? jtx->valuestring : "");
+        n++;
+    }
+    cJSON_Delete(arr);
+    return n;
+}
+
+int sb_reminder_mark_sent(long long id) {
+    if (!sb_on) return 0;
+    char path[128];
+    snprintf(path, sizeof(path), "/reminders?id=eq.%lld", id);
+    return sb_call("PATCH", path, "{\"sent\":true}");
+}
+
+int sb_reminder_cancel(long long chat_id) {
+    if (!sb_on) return 0;
+    char path[160];
+    snprintf(path, sizeof(path), "/reminders?chat_id=eq.%lld&sent=eq.false", chat_id);
+    return sb_call("DELETE", path, NULL);
+}
+
 /* ================= Диагностика: /diag/supabase ================= */
 
 /* Точный счётчик строк PostgREST: GET ...&limit=0 с Prefer: count=exact —

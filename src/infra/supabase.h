@@ -73,6 +73,31 @@ int sb_time_day_read(const char *month_tab, int day,
                      char *hours, size_t hcap,
                      char *sum, size_t scap);
 
+/* ---------- напоминания бота ---------- */
+
+#define SB_REMINDER_TEXT 512
+
+typedef struct {
+    long long id;
+    long long chat_id;
+    char      text[SB_REMINDER_TEXT];
+} SbReminder;
+
+/* Добавляет напоминание на момент remind_at (UTC, секунды с эпохи).
+   Возвращает HTTP-код (2xx — успех), 0 — выключено/сетевая ошибка. */
+int sb_reminder_add(long long chat_id, long long remind_at, const char *text);
+
+/* Забирает созревшие (remind_at <= now, sent=false) напоминания.
+   Возвращает число записей (0 — нет или ошибка). */
+int sb_reminder_due(long long now, SbReminder *out, int max);
+
+/* Помечает напоминание отправленным. HTTP-код, 0 — выключено/ошибка. */
+int sb_reminder_mark_sent(long long id);
+
+/* Удаляет неотправленные напоминания чата (кнопка «Отменить»).
+   HTTP-код, 0 — выключено/ошибка. */
+int sb_reminder_cancel(long long chat_id);
+
 /* Диагностика для GET /diag/supabase (ручной мониторинг между этапами):
    точные счётчики schedule (всего/валидных/служебных), построчно по месяцам,
    time_entries, последняя запись и последний restore из sync_log с возрастом

@@ -29,7 +29,7 @@ TARGET_NATIVE = server_app
 SRC = $(shell find src -name '*.c' | sort)
 INCLUDES = -Isrc
 
-.PHONY: all build run clean test test-js test-supabase test-core
+.PHONY: all build run clean test test-js test-supabase test-core test-reminders
 
 all: build
 
@@ -59,7 +59,7 @@ run: build
 	fi
 
 # Тесты (C-часть: нужен libcurl с GNU-именем -l:libcurl.so.4, т.е. Linux)
-test:
+test: test-reminders
 	bash tests/run.sh
 
 # Тесты JS-части Mini App (нужны node и jsdom: npm i --no-save jsdom)
@@ -74,6 +74,14 @@ test-supabase:
 		src/core/shift.c src/core/date_time.c \
 		src/domain/schedule.c src/domain/time_entry.c \
 		src/vendor/cJSON.c -o /tmp/test_supabase $(CURL_LIB) && /tmp/test_supabase
+
+# Юнит-тест планирования напоминаний (чистая логика, без сети/БД)
+test-reminders:
+	$(CC_NATIVE) -O0 -g -Wall -Wextra $(INCLUDES) tests/test_reminders.c \
+		src/domain/reminder.c src/domain/schedule.c \
+		src/core/json_text.c src/core/strbuf.c src/core/num.c \
+		src/core/url_codec.c src/core/date_time.c src/core/shift.c \
+		src/vendor/cJSON.c -o /tmp/test_reminders && /tmp/test_reminders
 
 # Юнит-тесты чистого ядра (core + domain): без сети и без файлов
 test-core:

@@ -1,6 +1,7 @@
 #include "app/background.h"
 
 #include "app/month_cache.h"
+#include "app/reminder_service.h"
 #include "app/schedule_service.h"
 #include "domain/schedule.h"
 #include "infra/supabase.h"
@@ -113,6 +114,10 @@ void background_run(AppContext *app) {
         }
 
         month_schedules_free(months, c);
+
+        /* Напоминания бота: отправляем созревшие (раз в минуту). */
+        int reminded = reminders_flush(&app->cfg);
+        if (reminded > 0) fprintf(stderr, "[remind] sent: %d\n", reminded);
 
         /* Кнопка меню чата (доступ к графику-таблице) ставится периодически:
            если при старте запрос не прошёл, доступ к таблице восстановится. */

@@ -1,6 +1,7 @@
 #include "app/bot_service.h"
 
 #include "app/month_cache.h"
+#include "app/reminder_service.h"
 #include "vendor/cJSON.h"
 #include "domain/schedule.h"
 #include "infra/telegram_api.h"
@@ -10,16 +11,25 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Клавиатура учёта времени (Пришла / Ушла) в JSON-виде. */
-#define TRACK_KEYBOARD_JSON "{\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
+/* Клавиатура учёта времени (Пришла / Ушла / Напомнить) в JSON-виде. */
+#define TRACK_KEYBOARD_JSON "{\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"}],[{\"text\":\"Напомнить\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
 
 /* Инлайн-клавиатура учёта времени. */
 #define TRACK_INLINE_JSON "{\"inline_keyboard\":[[{\"text\":\"Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"Ушла\",\"callback_data\":\"trk_out\"}]]}"
 
+/* Выбор времени напоминания о завтрашней смене. */
+#define REMIND_INLINE_JSON "{\"inline_keyboard\":[" \
+    "[{\"text\":\"08:00\",\"callback_data\":\"rm:08\"}," \
+    "{\"text\":\"09:00\",\"callback_data\":\"rm:09\"}," \
+    "{\"text\":\"20:00\",\"callback_data\":\"rm:20\"}]," \
+    "[{\"text\":\"За час до смены\",\"callback_data\":\"rm:shift\"}]," \
+    "[{\"text\":\"Отменить напоминания\",\"callback_data\":\"rm:off\"}]]}"
+
 static const char HELP_MSG[] =
     "Привет! Я бот-график смен.\n\n"
     "График — кнопка меню чата\n"
-    "Отметить время — кнопки внизу";
+    "Отметить время — кнопки внизу\n"
+    "Напомнить — сообщение о смене завтра";
 
 void bot_service_init(BotService *bot, const AppConfig *cfg,
                        TrackingService *tracking) {
@@ -56,6 +66,13 @@ static void send_track_menu(BotService *bot, long long chat_id) {
 static void send_track_inline(BotService *bot, long long chat_id) {
     telegram_send_text_markup(bot->cfg->bot_token, chat_id,
                                "Отметьте рабочее время:", TRACK_INLINE_JSON);
+}
+
+/* Меню выбора времени напоминания о завтрашней смене. */
+static void send_remind_menu(BotService *bot, long long chat_id) {
+    telegram_send_text_markup(bot->cfg->bot_token, chat_id,
+                               "Когда напомнить о завтрашней смене?",
+                               REMIND_INLINE_JSON);
 }
 
 /* Выполняет отметку и отправляет результат в чат. */
@@ -160,6 +177,8 @@ void bot_process_update(BotService *bot, const char *body) {
                 bot_track(bot, cid, "in");
             } else if (strstr(text, "Ушла") || strcmp(low, "/out") == 0) {
                 bot_track(bot, cid, "out");
+            } else if (strstr(low, "/remind") || strstr(text, "Напомин")) {
+                send_remind_menu(bot, cid);
             } else if (strstr(low, "/track") || strstr(low, "/time") ||
                        strstr(text, "Отметить") || strstr(text, "время")) {
                 send_track_inline(bot, cid);
@@ -205,6 +224,31 @@ void bot_process_update(BotService *bot, const char *body) {
             if (strcmp(data, "trk_out") == 0) {
                 bot_track(bot, cid, "out");
                 if (cqid) telegram_answer_callback(bot->cfg->bot_token, cqid, "Записано");
+                month_schedules_free(months, count);
+                cJSON_Delete(root);
+                return;
+            }
+            /* Напоминание о завтрашней смене */
+            if (strncmp(data, "rm:", 3) == 0) {
+                const char *choice = data + 3;
+                if (strcmp(choice, "off") == 0) {
+                    int rc = reminder_cancel(cid);
+                    if (cqid)
+                        telegram_answer_callback(bot->cfg->bot_token, cqid,
+                                                 rc == 0 ? "Отменено" : "Ошибка");
+                    send_text_kb(bot, cid,
+                                 rc == 0 ? "Напоминания отменены."
+                                         : "Не удалось отменить: база недоступна.");
+                } else {
+                    char reply[768];
+                    int rc = reminder_schedule(bot->cfg, bot->tracking,
+                                               months, count, cid, choice,
+                                               reply, sizeof(reply));
+                    if (cqid)
+                        telegram_answer_callback(bot->cfg->bot_token, cqid,
+                                                 rc == 0 ? "Готово" : "Не получилось");
+                    send_text_kb(bot, cid, reply);
+                }
                 month_schedules_free(months, count);
                 cJSON_Delete(root);
                 return;
