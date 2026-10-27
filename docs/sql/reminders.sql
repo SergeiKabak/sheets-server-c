@@ -31,12 +31,20 @@ create index if not exists reminders_due_idx
     where not sent;
 
 -- ------------------------------------------------------------ reminder_subs
--- Кто включил режим «напоминать о начале и конце смены по графику».
+-- Кто включил режим «напоминать по графику» и с какими настройками.
 create table if not exists public.reminder_subs (
-    chat_id    bigint      primary key,
-    enabled    boolean     not null default true,
-    updated_at timestamptz not null default now()
+    chat_id         bigint      primary key,
+    enabled         boolean     not null default true,
+    start_lead_min  int         not null default 15,  -- за сколько до начала смены
+    end_delay_min   int         not null default 0,   -- через сколько после конца
+    updated_at      timestamptz not null default now()
 );
+
+-- Догоняем таблицу, созданную ранней версией миграции (без настроек).
+alter table public.reminder_subs
+    add column if not exists start_lead_min int not null default 15;
+alter table public.reminder_subs
+    add column if not exists end_delay_min  int not null default 0;
 
 alter table public.reminders     enable row level security;
 alter table public.reminder_subs enable row level security;

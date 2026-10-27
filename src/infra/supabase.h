@@ -106,12 +106,24 @@ int sb_reminder_cancel_auto(long long chat_id);
 
 /* ---------- подписка «напоминать по графику» ---------- */
 
-/* Включает/выключает ежедневные напоминания чата. HTTP-код, 0 — выключено. */
-int sb_sub_set(long long chat_id, int enabled);
+typedef struct {
+    long long chat_id;
+    int       start_lead_min;   /* за сколько минут до начала смены */
+    int       end_delay_min;    /* через сколько минут после конца */
+} SbSub;
 
-/* Заполняет out идентификаторами чатов с включённым режимом.
+/* Сохраняет настройки чата (upsert по chat_id). HTTP-код, 0 — выключено. */
+int sb_sub_set(long long chat_id, int enabled, int start_lead_min,
+               int end_delay_min);
+
+/* Читает настройки чата. 0 — найдены, 1 — записи нет (значения по
+   умолчанию: выключено, 15 и 0), -1 — ошибка/БД недоступна. */
+int sb_sub_get(long long chat_id, int *enabled, int *start_lead_min,
+               int *end_delay_min);
+
+/* Заполняет out подписками с включённым режимом.
    Возвращает число чатов (0 — нет или ошибка). */
-int sb_sub_enabled(long long *out, int max);
+int sb_sub_list(SbSub *out, int max);
 
 /* Диагностика для GET /diag/supabase (ручной мониторинг между этапами):
    точные счётчики schedule (всего/валидных/служебных), построчно по месяцам,

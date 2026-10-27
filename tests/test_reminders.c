@@ -153,6 +153,14 @@ int main(void) {
                             slots, REMINDER_SLOTS_MAX);
     ok(ns == 0, "day: после смены — пусто");
 
+    /* задержка после конца смены: напомнить через 10 минут (14:50) */
+    ns = reminder_day_slots(morning, 0, &m, 1, 15, 10, slots,
+                            REMINDER_SLOTS_MAX);
+    ok(ns == 2 && slots[1].at == epoch(2026, 10, 27, 14, 50),
+       "day: уход — через 10 мин после конца (14:50)");
+    ok(ns == 2 && strstr(slots[1].text, "10 мин назад") != NULL,
+       "day: в тексте «10 мин назад»");
+
     /* пояс UTC+3: 06:30 локально = 03:30 UTC */
     ns = reminder_day_slots(epoch(2026, 10, 27, 3, 30), 3 * 3600, &m, 1, 15, 0,
                             slots, REMINDER_SLOTS_MAX);

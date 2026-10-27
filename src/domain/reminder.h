@@ -54,14 +54,14 @@ int reminder_plan(long long now, int tz_offset,
 
 /* Напоминания на сегодняшнюю смену по графику:
  *   — за start_lead минут до начала («отметьте приход»);
- *   — за end_lead минут до конца («отметьте уход»).
+ *   — через end_delay минут после конца («отметьте уход»; 0 — сразу).
  * Уже прошедшие моменты пропускаются, поэтому функция идемпотентна:
  * её можно звать каждый тик фонового цикла.
  * Возвращает число слотов (0 — смены сегодня нет / нет графика),
  * -1 при неверных аргументах. */
 int reminder_day_slots(long long now, int tz_offset,
                        const MonthSchedule *months, int count,
-                       int start_lead, int end_lead,
+                       int start_lead, int end_delay,
                        ReminderSlot *out, int max);
 
 #ifdef __cplusplus

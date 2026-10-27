@@ -239,11 +239,11 @@ int reminder_plan(long long now, int tz_offset,
 
 int reminder_day_slots(long long now, int tz_offset,
                        const MonthSchedule *months, int count,
-                       int start_lead, int end_lead,
+                       int start_lead, int end_delay,
                        ReminderSlot *out, int max) {
     if (!out || max <= 0) return -1;
     if (start_lead < 0) start_lead = 0;
-    if (end_lead < 0) end_lead = 0;
+    if (end_delay < 0) end_delay = 0;
 
     long long midnight = 0;
     int day = 0;
@@ -263,7 +263,7 @@ int reminder_day_slots(long long now, int tz_offset,
 
     int n = 0;
     long long at_start = midnight + (long long)(ds.start_min - start_lead) * 60;
-    long long at_end = midnight + (long long)(ds.end_min - end_lead) * 60;
+    long long at_end = midnight + (long long)(ds.end_min + end_delay) * 60;
 
     if (at_start > now + 30 && n < max) {
         out[n].at = at_start - tz_offset;
@@ -284,11 +284,11 @@ int reminder_day_slots(long long now, int tz_offset,
     if (at_end > now + 30 && n < max) {
         out[n].at = at_end - tz_offset;
         snprintf(out[n].kind, sizeof(out[n].kind), "shift_end");
-        if (end_lead > 0)
+        if (end_delay > 0)
             snprintf(out[n].text, sizeof(out[n].text),
-                     "Смена заканчивается в %s — через %d мин.\n"
+                     "Смена закончилась в %s (%d мин назад).\n"
                      "Отметьте уход кнопкой «Ушла».",
-                     hhmm_end, end_lead);
+                     hhmm_end, end_delay);
         else
             snprintf(out[n].text, sizeof(out[n].text),
                      "Смена закончилась в %s.\n"

@@ -551,20 +551,83 @@ int sb_reminder_cancel_auto(long long chat_id) {
 
 /* ---------- подписка «напоминать по графику» ---------- */
 
-int sb_sub_set(long long chat_id, int enabled) {
+int sb_sub_set(long long chat_id, int enabled, int start_lead_min,
+               int end_delay_min) {
     if (!sb_on) return 0;
-    char body[96];
-    snprintf(body, sizeof(body), "{\"chat_id\":%lld,\"enabled\":%s}",
-             chat_id, enabled ? "true" : "false");
-    return sb_call("POST", "/reminder_subs?on_conflict=chat_id", body);
+    char body[160];
+    snprintf(body, sizeof(body),
+             "{\"chat_id\":%lld,\"enabled\":%s,\"start_lead_min\":%d,"
+             "\"end_delay_min\":%d}",
+             chat_id, enabled ? "true" : "false", start_lead_min,
+             end_delay_min);
+    int st = sb_call("POST", "/reminder_subs?on_conflict=chat_id", body);
+
+    /* Старая схема без колонок настроек — включаем хотя бы режим. */
+    if (st == 400 || st == 404) {
+        char mini[96];
+        snprintf(mini, sizeof(mini), "{\"chat_id\":%lld,\"enabled\":%s}",
+                 chat_id, enabled ? "true" : "false");
+        st = sb_call("POST", "/reminder_subs?on_conflict=chat_id", mini);
+    }
+    return st;
 }
 
-int sb_sub_enabled(long long *out, int max) {
-    if (!sb_on || !out || max <= 0) return 0;
+int sb_sub_get(long long chat_id, int *enabled, int *start_lead_min,
+               int *end_delay_min) {
+    if (enabled) *enabled = 0;
+    if (start_lead_min) *start_lead_min = 15;
+    if (end_delay_min) *end_delay_min = 0;
+    if (!sb_on) return -1;
 
     char path[192];
     snprintf(path, sizeof(path),
-             "/reminder_subs?select=chat_id&enabled=eq.true&limit=%d", max);
+             "/reminder_subs?select=enabled,start_lead_min,end_delay_min"
+             "&chat_id=eq.%lld&limit=1", chat_id);
+
+    int status = 0;
+    char *resp = sb_get(path, &status);
+    if (status == 400 || status == 404) {
+        /* Старая схема без колонок настроек — читаем хотя бы enabled. */
+        free(resp);
+        snprintf(path, sizeof(path),
+                 "/reminder_subs?select=enabled&chat_id=eq.%lld&limit=1",
+                 chat_id);
+        resp = sb_get(path, &status);
+    }
+    if (!resp || status < 200 || status > 299) {
+        free(resp);
+        return -1;
+    }
+
+    cJSON *arr = cJSON_Parse(resp);
+    free(resp);
+    if (!cJSON_IsArray(arr)) { cJSON_Delete(arr); return -1; }
+
+    int rc = 0;
+    cJSON *it = cJSON_GetArrayItem(arr, 0);
+    if (it) {
+        cJSON *je = cJSON_GetObjectItemCaseSensitive(it, "enabled");
+        cJSON *jl = cJSON_GetObjectItemCaseSensitive(it, "start_lead_min");
+        cJSON *jd = cJSON_GetObjectItemCaseSensitive(it, "end_delay_min");
+        if (enabled && cJSON_IsBool(je)) *enabled = cJSON_IsTrue(je);
+        if (start_lead_min && cJSON_IsNumber(jl))
+            *start_lead_min = (int)jl->valuedouble;
+        if (end_delay_min && cJSON_IsNumber(jd))
+            *end_delay_min = (int)jd->valuedouble;
+    } else {
+        rc = 1;   /* записи нет — остаются значения по умолчанию */
+    }
+    cJSON_Delete(arr);
+    return rc;
+}
+
+int sb_sub_list(SbSub *out, int max) {
+    if (!sb_on || !out || max <= 0) return 0;
+
+    char path[224];
+    snprintf(path, sizeof(path),
+             "/reminder_subs?select=chat_id,start_lead_min,end_delay_min"
+             "&enabled=eq.true&limit=%d", max);
 
     int status = 0;
     char *resp = sb_get(path, &status);
@@ -582,8 +645,13 @@ int sb_sub_enabled(long long *out, int max) {
     cJSON_ArrayForEach(it, arr) {
         if (n >= max) break;
         cJSON *jcid = cJSON_GetObjectItemCaseSensitive(it, "chat_id");
+        cJSON *jl = cJSON_GetObjectItemCaseSensitive(it, "start_lead_min");
+        cJSON *jd = cJSON_GetObjectItemCaseSensitive(it, "end_delay_min");
         if (!cJSON_IsNumber(jcid)) continue;
-        out[n++] = (long long)jcid->valuedouble;
+        out[n].chat_id = (long long)jcid->valuedouble;
+        out[n].start_lead_min = cJSON_IsNumber(jl) ? (int)jl->valuedouble : 15;
+        out[n].end_delay_min = cJSON_IsNumber(jd) ? (int)jd->valuedouble : 0;
+        n++;
     }
     cJSON_Delete(arr);
     return n;

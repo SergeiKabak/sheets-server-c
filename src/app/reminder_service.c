@@ -10,6 +10,12 @@
 
 #define REMINDER_BATCH 20   /* сколько напоминаний разбираем за один тик */
 
+static int clamp_minutes(int v, int max) {
+    if (v < 0) return 0;
+    if (v > max) return max;
+    return v;
+}
+
 int reminder_schedule(const AppConfig *cfg, TrackingService *svc,
                       const MonthSchedule *months, int count,
                       long long chat_id, const char *choice,
@@ -39,39 +45,33 @@ int reminder_schedule(const AppConfig *cfg, TrackingService *svc,
     return 0;
 }
 
-int reminder_daily_set(long long chat_id, int enabled, char *reply, size_t cap) {
-    if (reply && cap) reply[0] = '\0';
+int reminder_settings_get(long long chat_id, ReminderSettings *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    out->start_lead_min = REMINDER_START_LEAD_DEFAULT;
+    out->end_delay_min = REMINDER_END_DELAY_DEFAULT;
 
-    int st = sb_sub_set(chat_id, enabled);
-    if (st < 200 || st > 299) {
-        if (reply && cap)
-            snprintf(reply, cap,
-                     "Не удалось сохранить настройку: база недоступна. "
-                     "Попробуйте позже.");
-        return -1;
-    }
+    int enabled = 0, lead = REMINDER_START_LEAD_DEFAULT;
+    int delay = REMINDER_END_DELAY_DEFAULT;
+    int rc = sb_sub_get(chat_id, &enabled, &lead, &delay);
+    if (rc < 0) return -1;
 
-    if (!enabled) {
-        /* Снимаем уже разложенные на сегодня напоминания, чтобы не пришли. */
-        sb_reminder_cancel_auto(chat_id);
-        if (reply && cap)
-            snprintf(reply, cap, "Выключил напоминания по графику.");
-        return 0;
-    }
+    out->enabled = enabled;
+    out->start_lead_min = clamp_minutes(lead, REMINDER_LEAD_MAX);
+    out->end_delay_min = clamp_minutes(delay, REMINDER_DELAY_MAX);
+    return 0;
+}
 
-    if (reply && cap) {
-        if (REMINDER_END_LEAD_MIN > 0)
-            snprintf(reply, cap,
-                     "Включил. Буду напоминать за %d мин до начала смены "
-                     "и за %d мин до её конца — по графику.",
-                     REMINDER_START_LEAD_MIN, REMINDER_END_LEAD_MIN);
-        else
-            snprintf(reply, cap,
-                     "Включил. Буду напоминать за %d мин до начала смены "
-                     "и в момент её окончания — по графику.\n"
-                     "Время беру из таблицы смен.",
-                     REMINDER_START_LEAD_MIN);
-    }
+int reminder_settings_save(long long chat_id, const ReminderSettings *s) {
+    if (!s) return -1;
+    int st = sb_sub_set(chat_id, s->enabled ? 1 : 0,
+                        clamp_minutes(s->start_lead_min, REMINDER_LEAD_MAX),
+                        clamp_minutes(s->end_delay_min, REMINDER_DELAY_MAX));
+    if (st < 200 || st > 299) return -1;
+
+    /* Пересобираем сегодняшние авто-напоминания с новыми настройками
+       (при выключении — просто снимаем их, чтобы не пришли). */
+    sb_reminder_cancel_auto(chat_id);
     return 0;
 }
 
@@ -85,8 +85,8 @@ int reminders_materialize(const AppConfig *cfg, const TrackingService *svc,
     (void)cfg;
     if (!months || count <= 0 || !sb_enabled()) return 0;
 
-    long long chats[REMINDER_MAX_SUBS];
-    int nc = sb_sub_enabled(chats, REMINDER_MAX_SUBS);
+    SbSub subs[REMINDER_MAX_SUBS];
+    int nc = sb_sub_list(subs, REMINDER_MAX_SUBS);
     if (nc <= 0) return 0;
 
     long long now = (long long)time(NULL);
@@ -96,11 +96,11 @@ int reminders_materialize(const AppConfig *cfg, const TrackingService *svc,
     for (int i = 0; i < nc; i++) {
         ReminderSlot slots[REMINDER_SLOTS_MAX];
         int ns = reminder_day_slots(now, tz, months, count,
-                                    REMINDER_START_LEAD_MIN,
-                                    REMINDER_END_LEAD_MIN,
+                                    subs[i].start_lead_min,
+                                    subs[i].end_delay_min,
                                     slots, REMINDER_SLOTS_MAX);
         for (int j = 0; j < ns; j++) {
-            int st = sb_reminder_add_kind(chats[i], slots[j].kind,
+            int st = sb_reminder_add_kind(subs[i].chat_id, slots[j].kind,
                                           slots[j].at, slots[j].text);
             if (st >= 200 && st <= 299) added++;
         }
