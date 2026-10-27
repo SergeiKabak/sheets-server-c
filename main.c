@@ -303,8 +303,13 @@ static int build_months(MonthEntry *out, int max, FILE *idx) {
     int count = 0;
 
     for (int i = 0; i < sheet_count && count < max; i++) {
-        char range[256];
-        snprintf(range, sizeof(range), "%s!%s:%s", sheets[i], FROM_COL, TO_COL);
+        char range[MAX_SHEET_NAME + 128];
+        /* %.*s ограничивает имя листа — иначе gcc видит «плоский» массив
+           sheets[50][128] строкой до 6399 байт и warns -Wformat-truncation.
+           FROM_COL/TO_COL из getenv() — могут быть NULL. */
+        snprintf(range, sizeof(range), "%.*s!%s:%s",
+                 MAX_SHEET_NAME - 1, sheets[i],
+                 FROM_COL ? FROM_COL : "", TO_COL ? TO_COL : "");
 
         char *encoded_range = url_encode(range);
         char url[2048];
@@ -361,8 +366,9 @@ static int build_months(MonthEntry *out, int max, FILE *idx) {
 
         MonthEntry *m = &out[count];
         memset(m, 0, sizeof(MonthEntry));
-        strncpy(m->title, sheets[i], MAX_SHEET_NAME - 1);
-        m->title[MAX_SHEET_NAME - 1] = '\0';
+        /* копирование с ограничением длины: strncpy от gcc-14/15 даёт
+           -Wstringop-truncation (см. выше про плоский массив) */
+        snprintf(m->title, sizeof(m->title), "%.*s", MAX_SHEET_NAME - 1, sheets[i]);
 
         m->shift1 = copy_row((char **)rows[found_idx], row_lens[found_idx]);
         m->shift1_len = row_lens[found_idx];
