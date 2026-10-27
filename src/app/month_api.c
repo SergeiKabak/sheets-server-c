@@ -237,9 +237,17 @@ int month_api_cabinet_json(TrackingService *svc, const char *query,
     sbuf_append(&sb, "}");
 
     char *json = sbuf_take(&sb);
-    free(month); free(cabinet); free(day_s); free(shift);
-    if (!json) { snprintf(out, cap, "{}"); return 500; }
-    if (strlen(json) >= cap) { free(json); snprintf(out, cap, "{}"); return 500; }
+    if (!json) {
+        free(month); free(cabinet); free(day_s); free(shift);
+        snprintf(out, cap, "{}");
+        return 500;
+    }
+    if (strlen(json) >= cap) {
+        free(json);
+        free(month); free(cabinet); free(day_s); free(shift);
+        snprintf(out, cap, "{}");
+        return 500;
+    }
     memcpy(out, json, strlen(json) + 1);
     free(json);
 
@@ -248,5 +256,7 @@ int month_api_cabinet_json(TrackingService *svc, const char *query,
        тапы: трафик пропорционален реальной активности. */
     if (cache_hit == 0 && have_colleagues)
         schedule_refresh_colleagues_cache(month);
+
+    free(month); free(cabinet); free(day_s); free(shift);
     return 200;
 }
