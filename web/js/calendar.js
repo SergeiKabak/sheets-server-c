@@ -89,7 +89,7 @@
       if (c1) p.push('<span class="cal-cab" data-day="', day, '" data-cabinet="', esc(c1),
                      '" data-shift="', esc(sh1), '" title="', esc(sh1), '">', esc(c1), '</span>');
       if (c2) p.push('<span class="cal-cab" data-day="', day, '" data-cabinet="', esc(c2),
-                     '" data-shift="', esc(c2 === c1 ? '' : sh2), '" title="', esc(sh2), '">',
+                     '" data-shift="', esc(sh2), '" title="', esc(sh2), '">',
                      esc(c2), '</span>');
       p.push('<span class="cal-sum"></span></div>');
     }

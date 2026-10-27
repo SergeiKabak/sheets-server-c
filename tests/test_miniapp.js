@@ -46,13 +46,22 @@ async function main() {
     const url = String(u);
     window.__fetches.push(url + (o && o.method ? ' [' + o.method + ']' : ''));
     if (url.indexOf('/api/cabinet') >= 0) {
-      // реалистичный ответ коллег
+      // мок сервера: фильтрация коллег по пересечению смен (как в find_cabinet_colleagues)
+      const all = [{ name: 'Яновская Юлия Алексеевна', shift: '8:00-14:30' },
+                   { name: 'Гринь Юлия Геннадьевна', shift: '15:10-21:00' }];
+      const sm = url.match(/shift=([^&]*)/);
+      const shift = sm ? decodeURIComponent(sm[1]) : '';
+      const mins = s => { const m = /(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})/.exec(s);
+                          return m ? [+m[1] * 60 + +m[2], +m[3] * 60 + +m[4]] : null; };
+      let list = all;
+      if (shift) {
+        const q = mins(shift);
+        list = all.filter(c => { const t = mins(c.shift);
+                                 return q && t && q[0] < t[1] && t[0] < q[1]; });
+      }
       return Promise.resolve({
         status: 200,
-        text: () => Promise.resolve(JSON.stringify({
-          colleagues: [{ name: 'Иванов Иван', shift: '7:30-14:40' },
-                       { name: 'Петров Пётр', shift: '15:10-21:00' }]
-        }))
+        text: () => Promise.resolve(JSON.stringify({ colleagues: list }))
       });
     }
     return new Promise(() => {});   // остальные запросы — висят
@@ -153,24 +162,39 @@ async function main() {
   // --- коллеги: модалка в стиле диалога времени (не alert) ---
   window.__fetches = [];
   const alertsSnap = window.__alerts.length;
-  click(cell(1).querySelector('.cal-cab'));
-  ok(window.__fetches.length === 1 && /\/api\/cabinet\?month=/.test(window.__fetches[0]),
-     'тап по кабинету -> запрос коллег: ' + decodeURIComponent(window.__fetches[0]));
+  const cabs1 = cell(1).querySelectorAll('.cal-cab');
+  ok(cabs1.length === 2 && cabs1[0].getAttribute('data-shift') === '7:30-14:40' &&
+     cabs1[1].getAttribute('data-shift') === '15:10-21:00',
+     'обе смены (даже при одинаковом кабинете) несут свой shift');
+  click(cabs1[0]);
+  ok(window.__fetches.length === 1 && /shift=7%3A30-14%3A40/.test(window.__fetches[0]),
+     'тап по смене 1 -> фильтр shift=7:30-14:40: ' + decodeURIComponent(window.__fetches[0]));
   ok(!modal.classList.contains('open'), 'модалка времени не открывается');
   ok(colModal.classList.contains('open'), 'открывается модалка коллег (как диалог времени)');
-  ok(/Кабинет K2\.1/.test(document.getElementById('colleagues-title').textContent),
-     'заголовок: ' + document.getElementById('colleagues-title').textContent);
+  const title1 = document.getElementById('colleagues-title').textContent;
+  ok(/Кабинет K2\.1/.test(title1) && /смена 7:30-14:40/.test(title1),
+     'заголовок смены 1: ' + title1);
   await tick();
   const listHtml = document.getElementById('colleagues-list').innerHTML;
-  ok(/Иванов Иван/.test(listHtml) && /Петров Пётр/.test(listHtml) && /7:30-14:40/.test(listHtml),
-     'список коллег отрисован с именами и сменами');
-  ok(/class="col-row"/.test(listHtml), 'строки списка в стиле диалога (.col-row)');
+  ok(/Яновская Юлия Алексеевна/.test(listHtml) && !/Гринь Юлия Геннадьевна/.test(listHtml),
+     'смена 1: только коллеги первой смены');
+  ok(!/col-row/.test(listHtml) === false, 'строки списка в стиле диалога (.col-row)');
   ok(window.__alerts.length === alertsSnap, 'alert() не используется для коллег');
 
   document.getElementById('colleagues-close').click();
   ok(!colModal.classList.contains('open'), 'кнопка «Закрыть» закрывает модалку коллег');
-  click(cell(1).querySelector('.cal-cab'));
+
+  // теперь вторая смена — тот же кабинет, но свой фильтр
+  window.__fetches = [];
+  click(cell(1).querySelectorAll('.cal-cab')[1]);
   await tick();
+  ok(window.__fetches.length === 1 && /shift=15%3A10-21%3A00/.test(window.__fetches[0]),
+     'тап по смене 2 -> фильтр shift=15:10-21:00: ' + decodeURIComponent(window.__fetches[0]));
+  const title2 = document.getElementById('colleagues-title').textContent;
+  ok(/смена 15:10-21:00/.test(title2), 'заголовок смены 2: ' + title2);
+  const list2 = document.getElementById('colleagues-list').innerHTML;
+  ok(/Гринь Юлия Геннадьевна/.test(list2) && !/Нет коллег|Яновская/.test(list2),
+     'смена 2: только коллеги второй смены');
   colModal.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));  // клик по подложке
   ok(!colModal.classList.contains('open'), 'клик по подложке закрывает модалку коллег');
 
