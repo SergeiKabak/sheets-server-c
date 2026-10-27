@@ -274,6 +274,32 @@ async function main() {
   ok(document.querySelectorAll('#months button.b').length === 2 &&
      document.querySelector('#months button.b').classList.contains('active'),
      'кнопки не пересоздаются, .active переключается');
+
+  // --- тема: переключатель, сохранение выбора, иконка ---
+  const tbtn = document.getElementById('theme-toggle');
+  ok(!!tbtn && !!document.querySelector('meta[name="theme-color"]'),
+     'кнопка темы и meta theme-color размечены');
+  window.localStorage.removeItem('theme');
+  APP.app.initTheme();
+  const root = document.documentElement;
+  ok(root.getAttribute('data-theme') === 'light',
+     'без сохранённого выбора и Telegram — светлая тема: ' + root.getAttribute('data-theme'));
+  ok(tbtn.textContent === '🌙' && tbtn.getAttribute('aria-pressed') === 'false',
+     'иконка светлой темы — луна (переключит на тёмную)');
+  click(tbtn);
+  ok(root.getAttribute('data-theme') === 'dark' && window.localStorage.getItem('theme') === 'dark',
+     'тап -> тёмная тема, выбор сохранён в localStorage');
+  ok(tbtn.textContent === '☀️' && tbtn.getAttribute('aria-pressed') === 'true',
+     'иконка тёмной темы — солнце');
+  ok(document.querySelector('meta[name="theme-color"]').getAttribute('content') === '#14161a',
+     'meta theme-color обновлён под тёмную тему');
+  APP.app.initTheme();   // повторная инициализация не должна сбрасывать выбор
+  ok(root.getAttribute('data-theme') === 'dark',
+     'сохранённый выбор переживает повторный init');
+  click(tbtn);
+  ok(root.getAttribute('data-theme') === 'light' && window.localStorage.getItem('theme') === 'light',
+     'повторный тап -> светлая тема, выбор сохранён');
+  window.localStorage.removeItem('theme');
 }
 
 main().then(() => {

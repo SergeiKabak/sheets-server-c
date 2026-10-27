@@ -3,15 +3,41 @@
 :root {
   --bg: #f5f5f5; --fg: #222; --card: #fff; --border: #e0e0e0;
   --head: #4CAF50; --head-fg: #fff;
+  --we-bg: #ffebee; --we-border: #f3c6c6;
+  --done-bg: #e8f5e9; --done-border: #c8e6c9;
+  --ok-bg: #e8f5e9; --ok-fg: #2E7D32; --ok-border: #2E7D32;
+  --err-bg: #ffebee; --err-fg: #C62828; --err-border: #C62828;
+  --shadow: rgba(0,0,0,.1);
 }
-body.dark, body[data-theme='dark'] {
-  --bg: #1e1e1e; --fg: #e0e0e0; --card: #2d2d2d; --border: #444;
+:root[data-theme='dark'], body[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #14161a; --fg: #e6e8eb; --card: #1e2127; --border: #333842;
   --head: #2E7D32; --head-fg: #fff;
+  --we-bg: #3a2424; --we-border: #5c3535;
+  --done-bg: #1c3325; --done-border: #2e5b3d;
+  --ok-bg: #1c3325; --ok-fg: #81c784; --ok-border: #2e5b3d;
+  --err-bg: #3a2424; --err-fg: #ef9a9a; --err-border: #5c3535;
+  --shadow: rgba(0,0,0,.45);
 }
 
 body { margin: 0; font-family: DejaVu Sans, Arial, sans-serif; background: var(--bg); color: var(--fg) }
 .c { padding: 10px }
 .h { display:none }
+
+/* Шапка: название и переключатель темы */
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px }
+.app-title { font-size: 17px; font-weight: 700; letter-spacing: .2px }
+.theme-toggle {
+  flex: none; width: 38px; height: 38px; padding: 0; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 18px; cursor: pointer;
+  background: var(--card); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 50%;
+  box-shadow: 0 1px 4px var(--shadow);
+  transition: transform .12s ease, background-color .2s ease;
+}
+.theme-toggle:active { transform: scale(.92) }
+.theme-toggle:focus-visible { outline: 2px solid #FF9800; outline-offset: 2px }
 
 /* Кнопки месяцев */
 .m { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px }
@@ -20,7 +46,7 @@ body { margin: 0; font-family: DejaVu Sans, Arial, sans-serif; background: var(-
 .b.active { outline: 3px solid #FF9800; outline-offset: 2px; background: #FF9800; color: #fff; font-weight: 600 }
 
 /* Контейнер календаря */
-.t { overflow-x: auto; background: var(--card); border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.1) }
+.t { overflow-x: auto; background: var(--card); border-radius: 8px; box-shadow: 0 2px 8px var(--shadow) }
 
 /* Инфоблок месяца */
 .cal-info { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 10px 6px; align-items: center; font-size: 13px }
@@ -40,17 +66,17 @@ body { margin: 0; font-family: DejaVu Sans, Arial, sans-serif; background: var(-
 }
 .cal-d.pad { visibility: hidden }
 .cal-d[data-has] { cursor: pointer }
-.cal-d.we { background: #ffebee; border-color: #f3c6c6 }
+.cal-d.we { background: var(--we-bg); border-color: var(--we-border) }
 .cal-d.we .cal-num { color: #C62828 }
 .cal-d.we-work::after {
   content: 'раб.'; position: absolute; right: 3px; bottom: 2px;
-  font-size: 9px; font-weight: bold; color: #2E7D32;
+  font-size: 9px; font-weight: bold; color: var(--ok-fg);
 }
-.cal-d.done { background: #e8f5e9; border-color: #c8e6c9 }
+.cal-d.done { background: var(--done-bg); border-color: var(--done-border) }
 .cal-today { outline: 2px solid #FF9800; outline-offset: -2px }
 
 .cal-num { font-size: 13px; font-weight: bold; line-height: 1.2 }
-.cal-mark { position: absolute; top: 3px; right: 4px; color: #2E7D32; font-size: 12px; font-weight: bold }
+.cal-mark { position: absolute; top: 3px; right: 4px; color: var(--ok-fg); font-size: 12px; font-weight: bold }
 
 .cal-cab {
   display: block; width: 100%; box-sizing: border-box;
@@ -61,14 +87,11 @@ body { margin: 0; font-family: DejaVu Sans, Arial, sans-serif; background: var(-
 }
 .cal-cab:hover { background: rgba(26,115,232,.20) }
 
-.cal-sum { display: none; font-size: 11px; font-weight: bold; color: #2E7D32; letter-spacing: -.2px }
+.cal-sum { display: none; font-size: 11px; font-weight: bold; color: var(--ok-fg); letter-spacing: -.2px }
 .cal.show-sum .cal-sum { display: block }
 
-body[data-theme='dark'] .cal-cab { background: rgba(100,180,255,.16); color: #64b4ff }
-body[data-theme='dark'] .cal-cab:hover { background: rgba(100,180,255,.28) }
-body[data-theme='dark'] .cal-sum { color: #81c784 }
-body[data-theme='dark'] .cal-d.we { background: #3a2424; border-color: #5c3535 }
-body[data-theme='dark'] .cal-d.done { background: #1c3325; border-color: #2e5b3d }
+:root[data-theme='dark'] .cal-cab { background: rgba(100,180,255,.16); color: #64b4ff }
+:root[data-theme='dark'] .cal-cab:hover { background: rgba(100,180,255,.28) }
 
 /* Учёт рабочего времени */
 .trk { margin-top: 16px; padding: 12px; background: var(--card); border-radius: 8px }
@@ -83,8 +106,8 @@ body[data-theme='dark'] .cal-d.done { background: #1c3325; border-color: #2e5b3d
 .trk .st { margin-top: 8px; font-size: 13px; color: var(--fg); opacity: .8 }
 
 .trk-banner { display: none; margin-top: 10px; padding: 12px; border-radius: 6px; font-weight: bold; font-size: 16px }
-.trk-banner.ok { display: block; background: #e8f5e9; color: #2E7D32; border: 2px solid #2E7D32 }
-.trk-banner.err { display: block; background: #ffebee; color: #C62828; border: 2px solid #C62828 }
+.trk-banner.ok { display: block; background: var(--ok-bg); color: var(--ok-fg); border: 2px solid var(--ok-border) }
+.trk-banner.err { display: block; background: var(--err-bg); color: var(--err-fg); border: 2px solid var(--err-border) }
 
 /* Модалка ввода времени */
 .trk-modal {
@@ -110,7 +133,7 @@ body[data-theme='dark'] .cal-d.done { background: #1c3325; border-color: #2e5b3d
 .trk-box .save { background: #2E7D32; color: #fff }
 .trk-box .cancel { background: #777; color: #fff }
 .trk-box button:disabled { opacity: .5 }
-.trk-err { min-height: 18px; margin-top: 8px; font-size: 13px; color: #C62828 }
+.trk-err { min-height: 18px; margin-top: 8px; font-size: 13px; color: var(--err-fg) }
 .trk-info { display: none; font-size: 13px; opacity: .75; margin-top: -4px; margin-bottom: 2px }
 .trk-box .erase { background: #C62828; color: #fff }
 
@@ -123,4 +146,6 @@ body[data-theme='dark'] .cal-d.done { background: #1c3325; border-color: #2e5b3d
 .col-name { font-weight: 600; font-size: 14px }
 .col-shift { font-size: 13px; font-weight: 600; color: #1a73e8; white-space: nowrap }
 .col-empty { font-size: 14px; opacity: .85; padding: 4px 0 }
-body[data-theme='dark'] .col-shift { color: #64b4ff }
+:root[data-theme='dark'] .col-shift { color: #64b4ff }
+:root[data-theme='dark'] .cal-d.we .cal-num { color: #ef9a9a }
+:root[data-theme='dark'] .cal-h.we { background: #8e2b2b }

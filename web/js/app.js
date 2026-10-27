@@ -6,11 +6,82 @@
   var monthsBuilt = false;
   var reqSeq = 0;            /* защита от ответов «не того месяца» при быстрых переключениях */
 
-  function applyTheme() {
-    var s = 'light';
-    var tg = window.Telegram && window.Telegram.WebApp;
-    if (tg && tg.colorScheme) s = tg.colorScheme;
-    document.body.setAttribute('data-theme', s);
+  /* ---------- тема ---------- */
+
+  var THEME_KEY = 'theme';
+  var META_LIGHT = '#f5f5f5';
+  var META_DARK = '#14161a';
+
+  function tgApp() {
+    return window.Telegram && window.Telegram.WebApp;
+  }
+
+  function savedTheme() {
+    try {
+      var t = localStorage.getItem(THEME_KEY);
+      return (t === 'dark' || t === 'light') ? t : null;
+    } catch (e) { return null; }
+  }
+
+  function systemTheme() {
+    var tg = tgApp();
+    if (tg && tg.colorScheme) return tg.colorScheme;
+    return (window.matchMedia &&
+            matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  }
+
+  /* Применяет тему: атрибут на <html> (CSS-переменные), иконку кнопки,
+     цвет системной панели браузера и шапки Telegram. */
+  function applyTheme(theme) {
+    var t = (theme === 'dark') ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', t);
+
+    var btn = document.getElementById('theme-toggle');
+    if (btn) {
+      /* иконка показывает, что произойдёт по нажатию */
+      btn.textContent = (t === 'dark') ? '☀️' : '🌙';
+      btn.setAttribute('aria-label',
+        (t === 'dark') ? 'Включить светлую тему' : 'Включить тёмную тему');
+      btn.setAttribute('title', btn.getAttribute('aria-label'));
+      btn.setAttribute('aria-pressed', t === 'dark' ? 'true' : 'false');
+    }
+
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', (t === 'dark') ? META_DARK : META_LIGHT);
+
+    var tg = tgApp();
+    if (tg) {
+      try {
+        if (tg.setHeaderColor) tg.setHeaderColor((t === 'dark') ? META_DARK : META_LIGHT);
+        if (tg.setBackgroundColor) tg.setBackgroundColor((t === 'dark') ? META_DARK : META_LIGHT);
+      } catch (e) {}
+    }
+    return t;
+  }
+
+  function toggleTheme() {
+    var next = (document.documentElement.getAttribute('data-theme') === 'dark')
+      ? 'light' : 'dark';
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+    applyTheme(next);
+  }
+
+  /* Тема на старте: сохранённый выбор важнее темы Telegram; если выбора нет,
+     следуем за Telegram и его сменой темы в рантайме. */
+  function initTheme() {
+    applyTheme(savedTheme() || systemTheme());
+
+    var btn = document.getElementById('theme-toggle');
+    if (btn) btn.addEventListener('click', toggleTheme);
+
+    var tg = tgApp();
+    if (tg && tg.onEvent) {
+      try {
+        tg.onEvent('themeChanged', function () {
+          if (!savedTheme()) applyTheme(systemTheme());
+        });
+      } catch (e) {}
+    }
   }
 
   /* Кнопки месяцев строятся один раз, дальше только переключается .active;
@@ -70,7 +141,7 @@
   }
 
   function init() {
-    applyTheme();
+    initTheme();
     try {
       A.tracking.bindUI();
       A.calendar.bind(document.getElementById('table'));
@@ -86,5 +157,6 @@
   }
 
   window.init = init;
-  A.app = { init: init, load: load, showMonths: showMonths, applyTheme: applyTheme };
+  A.app = { init: init, load: load, showMonths: showMonths,
+            applyTheme: applyTheme, toggleTheme: toggleTheme, initTheme: initTheme };
 })(window.APP = window.APP || {});
