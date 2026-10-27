@@ -51,7 +51,7 @@ test-js:
 
 # Юнит-тест буфера Supabase (офлайн, без сети)
 test-supabase:
-	$(CC_NATIVE) -O0 -g -Wall -Wextra -I. tests/test_supabase.c supabase.c http.c \
+	$(CC_NATIVE) -O0 -g -Wall -Wextra -I. tests/test_supabase.c supabase.c http.c cJSON.c \
 		-o /tmp/test_supabase -lcurl && /tmp/test_supabase
 
 clean:

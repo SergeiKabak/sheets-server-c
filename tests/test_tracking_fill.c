@@ -164,6 +164,9 @@ int main(int argc, char **argv) {
 
     remove("/tmp/trk_days_10.2026.json");
     remove("/tmp/trk_days_09.2026.json");
+    /* тест проверяет отсутствие кэша ноября — убираем и его, чтобы живые
+       запуски сервера (реальный синхронизатор) не ломали тест */
+    remove("/tmp/trk_days_11.2026.json");
 
     int gets0 = g_values_gets;
     code = tracking_days_json("Октябрь 2026", out, sizeof(out));

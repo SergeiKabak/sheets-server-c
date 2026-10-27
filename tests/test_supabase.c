@@ -7,6 +7,20 @@
 
 #include "supabase.h"
 
+
+/* подсчёт запятых (фикстуры не содержат запятых внутри значений) */
+static int ncommas(const char *s) {
+    int c = 0;
+    for (; *s; s++) if (*s == ',') c++;
+    return c;
+}
+
+/* тест-фильтр смен: пропускает всё, кроме вечерней (проверка предиката) */
+static int t_no_evening(const char *row_shift, const char *query) {
+    (void)query;
+    return strcmp(row_shift, "15:10-21:00") != 0;
+}
+
 int main(void) {
     setenv("SUPABASE_URL", "https://example-project.supabase.co/", 1);
     setenv("SUPABASE_SECRET_KEY", "test-secret-key", 1);
@@ -63,6 +77,65 @@ int main(void) {
     assert(sb_pending("10.2026", &n) == NULL || n == 0);  /* буфер очищен после flush */
 
     printf("OK   supabase buffer: дедуп, экранирование, учёт ошибок flush\n");
+
+    /* ---------- Этап 2: разбор месяца из строк PostgREST ---------- */
+    const char *mrows =
+        "[{\"day\":1,\"shift_time\":\"15:10-21:00\",\"cabinet\":\"K2.2\"},"
+        "{\"day\":1,\"shift_time\":\"7:30-14:40\",\"cabinet\":\"K2.1\"},"
+        "{\"day\":2,\"shift_time\":\"7:30-14:40\",\"cabinet\":\"Ц\"},"
+        "{\"day\":3,\"shift_time\":\"7:30-14:40\",\"cabinet\":\"K2.1\"}]";
+    char a1[4096], a2[4096];
+    assert(sb_month_arrays(mrows, "Бинкевич Татьяна Эдуардовна", 0, NULL,
+                           a1, sizeof a1, a2, sizeof a2) == 0);
+    /* утренняя смена = s1, хотя «15:10…» лексикографически меньше */
+    assert(!strcmp(a1, "[\"Бинкевич Татьяна Эдуардовна\",\"7:30-14:40\","
+                       "\"K2.1\",\"Ц\",\"K2.1\",\"3\"]"));
+    assert(!strcmp(a2, "[\"\",\"15:10-21:00\",\"K2.2\",\"\",\"\",\"1\"]"));
+
+    /* одна смена -> s2 пустой массив той же длины (как без строки листа) */
+    const char *rows1 = "[{\"day\":2,\"shift_time\":\"9:00-18:00\",\"cabinet\":\"K7\"}]";
+    assert(sb_month_arrays(rows1, "X", 0, NULL, a1, sizeof a1, a2, sizeof a2) == 0);
+    assert(!strcmp(a1, "[\"X\",\"9:00-18:00\",\"\",\"K7\",\"1\"]"));
+    assert(!strcmp(a2, "[\"\",\"\",\"\",\"\",\"\"]"));
+
+    /* размер месяца из заголовка: счётчик должен стоять после дня 31,
+       иначе календарь покажет его как кабинет в ячейке последнего дня */
+    assert(sb_month_arrays(rows1, "X", 31, NULL, a1, sizeof a1, a2, sizeof a2) == 0);
+    assert(ncommas(a1) == 33);              /* 34 элемента: имя+смена+31 день+счётчик */
+    assert(strstr(a1, ",\"1\"]") != NULL); /* счётчик в конце массива, не в ячейке дня */
+    assert(strstr(a1, "[\"X\",\"9:00-18:00\"") == a1);  /* имя и смена в начале */
+
+    /* листовой счётчик «Всего смен»: берём значение Google Sheets, в s2 пусто */
+    assert(sb_month_arrays(mrows, "Бинкевич Татьяна Эдуардовна", 3, "34",
+                           a1, sizeof a1, a2, sizeof a2) == 0);
+    assert(strstr(a1, ",\"34\"]") != NULL);
+    assert(strstr(a2, ",\"\"]") != NULL);
+    assert(sb_month_arrays(rows1, "X", 31, "34", a1, sizeof a1, a2, sizeof a2) == 0);
+    assert(strstr(a1, ",\"34\"]") != NULL);
+    assert(ncommas(a2) == 33);
+
+    /* нет данных / битый JSON -> -1 (фоллбэк на файлы) */
+    assert(sb_month_arrays("[]", "X", 0, NULL, a1, sizeof a1, a2, sizeof a2) == -1);
+    assert(sb_month_arrays("{nope", "X", 0, NULL, a1, sizeof a1, a2, sizeof a2) == -1);
+
+    /* ---------- Этап 2: коллеги ---------- */
+    const char *crows =
+        "[{\"employee\":\"Бинкевич Татьяна Эдуардовна\",\"shift_time\":\"7:30-14:40\"},"
+        "{\"employee\":\"Яновская Юлия Алексеевна\",\"shift_time\":\"8:00-14:30\"},"
+        "{\"employee\":\"Яновская Юлия Алексеевна\",\"shift_time\":\"8:00-14:30\"},"
+        "{\"employee\":\"Гринь Юлия Геннадьевна\",\"shift_time\":\"15:10-21:00\"}]";
+    char cj[4096];
+    assert(sb_colleagues_json(crows, "Бинкевич Татьяна Эдуардовна",
+                              NULL, NULL, cj, sizeof cj) > 0);
+    assert(!strcmp(cj, "[{\"name\":\"Яновская Юлия Алексеевна\",\"shift\":\"8:00-14:30\"},"
+                       "{\"name\":\"Гринь Юлия Геннадьевна\",\"shift\":\"15:10-21:00\"}]"));
+    /* с фильтром по смене: сам сотрудник исключён, вечерняя отсеяна, дубль убран */
+    assert(sb_colleagues_json(crows, "Бинкевич Татьяна Эдуардовна",
+                              "7:30-14:40", t_no_evening, cj, sizeof cj) > 0);
+    assert(!strcmp(cj, "[{\"name\":\"Яновская Юлия Алексеевна\",\"shift\":\"8:00-14:30\"}]"));
+    assert(sb_colleagues_json("[broken", NULL, NULL, NULL, cj, sizeof cj) == -1);
+
+    printf("OK   этап 2: разбор месяца (порядок смен, размер месяца, пустая s2) и коллег (self/дедуп/фильтр)\n");
     printf("ALL TESTS PASSED\n");
     return 0;
 }

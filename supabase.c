@@ -16,8 +16,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <time.h>
 
+#include "cJSON.h"
 #include "http.h"
 #include "supabase.h"
 
@@ -305,4 +307,207 @@ void sb_log(const char *kind, const char *month, int rows, int ok, const char *e
     int st = sb_call("POST", "/sync_log", body);
     if (st < 200 || st > 299)
         fprintf(stderr, "[supabase] sync_log -> HTTP %d (таблица создана?)\n", st);
+}
+
+/* ================= Этап 2: чтение из SQL ================= */
+
+/* snprintf-аппенд с контролем переполнения: новый offset или (size_t)-1 */
+static size_t addf(char *out, size_t cap, size_t off, const char *fmt, ...) {
+    if (out == NULL || off >= cap) return (size_t)-1;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out + off, cap - off, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap - off) return (size_t)-1;
+    return off + (size_t)n;
+}
+
+/* «7:30-14:40» -> минуты начала смены; не разобрано -> 999999 (в конец) */
+static int shift_start_min(const char *s) {
+    if (!s) return 999999;
+    while (*s == ' ') s++;
+    int h = 0, m = 0;
+    if (sscanf(s, "%d:%d", &h, &m) == 2 && h >= 0 && h < 48 && m >= 0 && m < 60)
+        return h * 60 + m;
+    return 999999;
+}
+
+char *sb_get(const char *path, int *status) {
+    if (status) *status = 0;
+    if (!sb_on || !path) return NULL;
+    char url[2048];
+    snprintf(url, sizeof(url), "%s%s", sb_base, path);
+    char apikey[600], auth[600];
+    snprintf(apikey, sizeof(apikey), "apikey: %s", sb_secret);
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", sb_secret);
+    const char *extra[3] = { apikey, auth, NULL };
+    return http_request_h("GET", url, NULL, NULL, extra, status);
+}
+
+#define SB_AGG_MAX 8   /* смен у сотрудника в месяце (Mini App показывает 2) */
+
+int sb_month_arrays(const char *rows_json, const char *employee,
+                    int sheet_days, const char *total,
+                    char *s1, size_t s1cap, char *s2, size_t s2cap) {
+    if (!s1 || !s2 || s1cap < 16 || s2cap < 16) return -1;
+    s1[0] = '\0';
+    s2[0] = '\0';
+
+    cJSON *arr = rows_json ? cJSON_Parse(rows_json) : NULL;
+    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return -1; }
+
+    struct Agg {
+        char  shift[128];
+        int   start;                       /* минуты начала — порядок как в листе */
+        int   maxday;
+        int   count;                       /* «Всего смен» */
+        char *cells[32];                   /* cells[день] = кабинет */
+    } aggs[SB_AGG_MAX];
+    int na = 0, maxday = 0;
+
+    int size = cJSON_GetArraySize(arr);
+    for (int i = 0; i < size; i++) {
+        cJSON *it  = cJSON_GetArrayItem(arr, i);
+        cJSON *jd  = it ? cJSON_GetObjectItemCaseSensitive(it, "day") : NULL;
+        cJSON *js  = it ? cJSON_GetObjectItemCaseSensitive(it, "shift_time") : NULL;
+        cJSON *jc  = it ? cJSON_GetObjectItemCaseSensitive(it, "cabinet") : NULL;
+        if (!cJSON_IsNumber(jd) || !cJSON_IsString(jc) || !jc->valuestring) continue;
+        int day = (int)jd->valuedouble;
+        if (day < 1 || day > 31) continue;
+        const char *sh = (cJSON_IsString(js) && js->valuestring) ? js->valuestring : "";
+
+        int k;
+        for (k = 0; k < na; k++)
+            if (!strcmp(aggs[k].shift, sh)) break;
+        if (k == na) {
+            if (na >= SB_AGG_MAX) continue;
+            memset(&aggs[na], 0, sizeof(aggs[na]));
+            snprintf(aggs[na].shift, sizeof(aggs[na].shift), "%s", sh);
+            aggs[na].start = shift_start_min(sh);
+            k = na++;
+        }
+        if (day > aggs[k].maxday) aggs[k].maxday = day;
+        if (day > maxday) maxday = day;
+        aggs[k].count++;
+        free(aggs[k].cells[day]);
+        aggs[k].cells[day] = strdup(jc->valuestring);
+    }
+    cJSON_Delete(arr);
+
+    if (na == 0 || maxday < 1) goto cleanup;   /* данных нет — вызывающий уйдёт в фоллбэк */
+
+    /* смены по времени начала: утренняя = s1, вечерняя = s2 (как в листе) */
+    for (int i = 1; i < na; i++) {
+        struct Agg tmp = aggs[i];
+        int j = i - 1;
+        for (; j >= 0 && aggs[j].start > tmp.start; j--) aggs[j + 1] = aggs[j];
+        aggs[j + 1] = tmp;
+    }
+
+    /* число дней = число столбцов листа (sheet_days), но не меньше данных:
+       счётчик должен стоять после последнего дня, как в листе */
+    int dim = sheet_days > maxday ? sheet_days : maxday;
+    if (dim < 1 || dim > 31) { goto cleanup; }
+
+    char em[768], sh[256], cell[768];
+    jesc(em, sizeof(em), employee ? employee : "");
+    jesc(sh, sizeof(sh), aggs[0].shift);
+
+    /* s1: [имя, смена, day1..dayD, всего смен] — формат строки листа */
+    size_t o = addf(s1, s1cap, 0, "[\"%s\",\"%s\"", em, sh);
+    for (int d = 1; d <= dim && o != (size_t)-1; d++) {
+        const char *v = (d <= aggs[0].maxday && aggs[0].cells[d]) ? aggs[0].cells[d] : "";
+        jesc(cell, sizeof(cell), v);
+        o = addf(s1, s1cap, o, ",\"%s\"", cell);
+    }
+    if (total) {
+        char t[64];
+        jesc(t, sizeof(t), total);
+        o = addf(s1, s1cap, o, ",\"%s\"]", t);      /* значение из листа */
+    } else {
+        o = addf(s1, s1cap, o, ",\"%d\"]", aggs[0].count);   /* запасной подсчёт */
+    }
+
+    /* s2: вторая смена либо пустой массив той же длины (как без второй строки) */
+    size_t o2 = 0;
+    if (na >= 2) {
+        jesc(sh, sizeof(sh), aggs[1].shift);
+        o2 = addf(s2, s2cap, 0, "[\"\",\"%s\"", sh);
+        for (int d = 1; d <= dim && o2 != (size_t)-1; d++) {
+            const char *v = (d <= aggs[1].maxday && aggs[1].cells[d]) ? aggs[1].cells[d] : "";
+            jesc(cell, sizeof(cell), v);
+            o2 = addf(s2, s2cap, o2, ",\"%s\"", cell);
+        }
+        if (total) {
+            o2 = addf(s2, s2cap, o2, ",\"\"]");    /* в листе счётчик только в 1-й строке */
+        } else {
+            o2 = addf(s2, s2cap, o2, ",\"%d\"]", aggs[1].count);
+        }
+    } else {
+        o2 = addf(s2, s2cap, 0, "[");
+        for (int d = 0; d < dim + 3 && o2 != (size_t)-1; d++)
+            o2 = addf(s2, s2cap, o2, "%s\"\"", d ? "," : "");
+        o2 = addf(s2, s2cap, o2, "]");
+    }
+
+    if (o == (size_t)-1 || o2 == (size_t)-1) {
+        s1[0] = '\0';
+        s2[0] = '\0';
+    }
+
+cleanup:
+    for (int k = 0; k < na; k++)
+        for (int d = 0; d < 32; d++) free(aggs[k].cells[d]);
+    if (!s1[0]) return -1;   /* ничего не построено (нет данных либо переполнение) */
+    return 0;
+}
+
+int sb_colleagues_json(const char *rows_json, const char *self,
+                       const char *shift, SBShiftFilter filter,
+                       char *out, size_t outcap) {
+    if (!out || outcap < 4) return -1;
+    out[0] = '\0';
+
+    cJSON *arr = rows_json ? cJSON_Parse(rows_json) : NULL;
+    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return -1; }
+
+    char enames[64][256];
+    char eshifts[64][128];
+    int emitted = 0, nout = 0;
+    size_t o = addf(out, outcap, 0, "[");
+
+    int size = cJSON_GetArraySize(arr);
+    for (int i = 0; i < size && emitted < 64; i++) {
+        cJSON *it = cJSON_GetArrayItem(arr, i);
+        cJSON *je = it ? cJSON_GetObjectItemCaseSensitive(it, "employee") : NULL;
+        cJSON *js = it ? cJSON_GetObjectItemCaseSensitive(it, "shift_time") : NULL;
+        if (!cJSON_IsString(je) || !je->valuestring || !je->valuestring[0]) continue;
+        const char *name = je->valuestring;
+        const char *s = (cJSON_IsString(js) && js->valuestring) ? js->valuestring : "";
+
+        if (self && *self && !strcmp(name, self)) continue;          /* сам сотрудник */
+        if (shift && *shift && filter && !filter(s, shift)) continue; /* пересечение смен */
+
+        int dup = 0;
+        for (int q = 0; q < emitted; q++)
+            if (!strcmp(enames[q], name) && !strcmp(eshifts[q], s)) { dup = 1; break; }
+        if (dup) continue;
+        snprintf(enames[emitted], sizeof(enames[0]), "%s", name);
+        snprintf(eshifts[emitted], sizeof(eshifts[0]), "%s", s);
+        emitted++;
+
+        char en[768], es[512];
+        jesc(en, sizeof(en), name);
+        jesc(es, sizeof(es), s);
+        o = addf(out, outcap, o, "%s{\"name\":\"%s\",\"shift\":\"%s\"}",
+                 nout ? "," : "", en, es);
+        if (o == (size_t)-1) break;
+        nout++;
+    }
+    cJSON_Delete(arr);
+
+    if (o == (size_t)-1) { out[0] = '\0'; return -1; }
+    o = addf(out, outcap, o, "]");
+    if (o == (size_t)-1) { out[0] = '\0'; return -1; }
+    return (int)o;
 }

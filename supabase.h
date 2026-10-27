@@ -42,4 +42,34 @@ void sb_log(const char *kind, const char *month, int rows, int ok, const char *e
 /* Содержимое буфера по месяцу — для диагностики и тестов (JSON-массив). */
 const char *sb_pending(const char *month, int *count);
 
+/* ---------------- Этап 2: чтение из SQL ---------------- */
+
+/* GET-запрос к PostgREST (path вида "/schedule?...").
+   Возвращает тело (освобождает caller) или NULL; *status — HTTP-код. */
+char *sb_get(const char *path, int *status);
+
+/* Строит JSON-массивы s1/s2 месяца Mini App из строк PostgREST:
+   rows_json — ответ /schedule?select=day,shift_time,cabinet&...
+   sheet_days — число столбцов-дней листа (n-3 из файлового кэша): счётчик
+   должен стоять после последнего дня, а не оказываться в ячейке дня;
+   total — листовое значение счётчика «Всего смен» (как в Google Sheets);
+   NULL — запасной подсчёт, "" — в листе пусто.
+   s1/s2: [имя, смена, кабинеты по дням, всего смен] — формат строки листа.
+   Смены сортируются по времени начала (как в листе: утренняя -> вечерняя).
+   Возвращает 0 при успехе, -1 если данных нет / JSON не разобран. */
+int sb_month_arrays(const char *rows_json, const char *employee,
+                    int sheet_days, const char *total,
+                    char *s1, size_t s1cap, char *s2, size_t s2cap);
+
+/* Предикат пересечения смен (передаёт вызывающая сторона — shifts_overlap) */
+typedef int (*SBShiftFilter)(const char *row_shift, const char *query);
+
+/* JSON-массив коллег из строк /schedule?...&select=employee,shift_time
+   в формате [{"name":..,"shift":..}] — как find_cabinet_colleagues_from_index:
+   сам сотрудник исключается, фильтр по смене через filter, дедуп имя+смена.
+   Возвращает длину или -1 при ошибке разбора. */
+int sb_colleagues_json(const char *rows_json, const char *self,
+                       const char *shift, SBShiftFilter filter,
+                       char *out, size_t outcap);
+
 #endif /* SUPABASE_H */

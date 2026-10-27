@@ -1026,6 +1026,92 @@ static void api_months(int fd) {
 }
 
 /* Отдаёт JSON месяца по ?name=... */
+/* ==== Этап 2 плана Supabase: чтение графика из SQL с фоллбэком на файлы ==== */
+
+/* Месяц из БД -> массивы s1/s2 в формате строк листа. 0 — успех, -1 — нет
+   данных / ошибка (вызывающая сторона уходит в файловый кэш). */
+static int sb_read_month(const char *title, const char *employee,
+                         int sheet_days, const char *total,
+                         char *s1, size_t s1cap, char *s2, size_t s2cap) {
+    char *em = url_encode(title);
+    char *ee = url_encode(employee);
+    char path[1024];
+    int rc = -1;
+    if (em && ee && *em && *ee) {
+        snprintf(path, sizeof(path),
+                 "/schedule?month=eq.%s&employee=eq.%s"
+                 "&select=day,shift_time,cabinet&order=shift_time,day",
+                 em, ee);
+        int st = 0;
+        char *body = sb_get(path, &st);
+        if (body && st >= 200 && st < 300)
+            rc = sb_month_arrays(body, employee, sheet_days, total, s1, s1cap, s2, s2cap);
+        else
+            fprintf(stderr, "[supabase] read month '%s' -> HTTP %d (фоллбэк на файлы)\n",
+                    title, st);
+        free(body);
+    }
+    free(em);
+    free(ee);
+    return rc;
+}
+
+/* Коллеги из БД -> JSON-массив. Длина или -1 (тогда — индексный файл). */
+static int sb_read_colleagues(const char *month, int day, const char *cabinet,
+                              const char *shift, char *out, size_t outcap) {
+    if (day < 1 || day > 31) return -1;
+    char *em = url_encode(month);
+    char *ec = url_encode(cabinet);
+    char path[1024];
+    int n = -1;
+    if (em && ec && *em && *ec) {
+        snprintf(path, sizeof(path),
+                 "/schedule?month=eq.%s&day=eq.%d&cabinet=eq.%s"
+                 "&select=employee,shift_time",
+                 em, day, ec);
+        int st = 0;
+        char *body = sb_get(path, &st);
+        if (body && st >= 200 && st < 300)
+            n = sb_colleagues_json(body, SEARCH_NAME, shift, shifts_overlap,
+                                   out, outcap);
+        else
+            fprintf(stderr, "[supabase] read colleagues -> HTTP %d (фоллбэк на индекс)\n", st);
+        free(body);
+    }
+    free(em);
+    free(ec);
+    return n;
+}
+
+/* Фоллбэк: массивы из файлового кэша месяцев (логика до этапа 2). */
+static int build_month_arrays_json(const MonthEntry *m,
+                                   char *s1, size_t s1cap, char *s2, size_t s2cap) {
+    int c1 = m->shift1_len, c2 = m->shift2_len;
+    int n = c1 > c2 ? c1 : c2;
+    if (n < 1) n = 1;
+    size_t o1 = 0, o2 = 0;
+    for (int i = 0; i < n; i++) {
+        const char *v = (i < c1 && m->shift1[i]) ? m->shift1[i] : "";
+        char *ev = json_escape(v);
+        int w = snprintf(s1 + o1, s1cap - o1, "%s\"%s\"", i ? "," : "[", ev ? ev : v);
+        free(ev);
+        if (w < 0 || (size_t)w >= s1cap - o1) return -1;
+        o1 += (size_t)w;
+    }
+    for (int i = 0; i < n; i++) {
+        const char *v = (i < c2 && m->shift2[i]) ? m->shift2[i] : "";
+        char *ev = json_escape(v);
+        int w = snprintf(s2 + o2, s2cap - o2, "%s\"%s\"", i ? "," : "[", ev ? ev : v);
+        free(ev);
+        if (w < 0 || (size_t)w >= s2cap - o2) return -1;
+        o2 += (size_t)w;
+    }
+    if (o1 >= s1cap - 2 || o2 >= s2cap - 2) return -1;
+    snprintf(s1 + o1, s1cap - o1, "]");
+    snprintf(s2 + o2, s2cap - o2, "]");
+    return 0;
+}
+
 static void api_month(int fd, const char *query) {
     const char *p = strstr(query, "name=");
     if (!p) { http_reply(fd, "400 Bad Request", "{\"error\":\"не указано имя\"}"); return; }
@@ -1040,11 +1126,9 @@ static void api_month(int fd, const char *query) {
     for (int i = 0; i < count; i++) {
         if (strcmp(mo[i].title, name) == 0) { idx = i; break; }
     }
-    if (idx < 0) { http_reply(fd, "404 Not Found", "{\"error\":\"не найдено\"}"); return; }
+    if (idx < 0) { free_months(mo, count); http_reply(fd, "404 Not Found", "{\"error\":\"не найдено\"}"); return; }
 
     MonthEntry *m = &mo[idx];
-    int c1 = m->shift1_len, c2 = m->shift2_len;
-    int n = c1 > c2 ? c1 : c2; if (n < 1) n = 1;
 
     /* Отметки Time tracking берём из локального кэша (его обновляет
        background_updater раз в 60 с). Если кэша нет — клиент запросит
@@ -1052,29 +1136,35 @@ static void api_month(int fd, const char *query) {
     char trk[16384];
     int have_trk = (tracking_days_cached_json(m->title, trk, sizeof(trk)) == 0);
 
-    size_t cap = 256 + (size_t)n * 160 + (have_trk ? strlen(trk) : 4);
+    /* структура листа: n ячеек = имя + смена + дни + счётчик -> дней = n-3;
+       листовой счётчик «Всего смен» — в последней ячейке первой строки */
+    int c1 = m->shift1_len, c2 = m->shift2_len;
+    int n = c1 > c2 ? c1 : c2;
+    if (n < 1) n = 1;
+    char total1[64] = "";
+    if (m->shift1 && c1 > 0 && m->shift1[c1 - 1])
+        snprintf(total1, sizeof(total1), "%s", m->shift1[c1 - 1]);
+
+    /* Этап 2: массивы месяца — из Supabase; при недоступности — файловый кэш */
+    char s1txt[16384] = "";
+    char s2txt[16384] = "";
+    int from_db = 0;
+    if (sb_enabled() && SEARCH_NAME && *SEARCH_NAME)
+        from_db = (sb_read_month(m->title, SEARCH_NAME, n - 3, total1,
+                                 s1txt, sizeof(s1txt), s2txt, sizeof(s2txt)) == 0);
+    if (!from_db && build_month_arrays_json(m, s1txt, sizeof(s1txt), s2txt, sizeof(s2txt)) != 0) {
+        free_months(mo, count);
+        http_reply(fd, "500 Internal Server Error", "{\"error\":\"нет данных месяца\"}");
+        return;
+    }
+
+    size_t cap = 256 + strlen(s1txt) + strlen(s2txt) + (have_trk ? strlen(trk) : 4);
     char *json = malloc(cap);
-    if (!json) { http_reply(fd, "500 Internal Server Error", "{}"); return; }
-    int off = snprintf(json, cap, "{\"t\":");
+    if (!json) { free_months(mo, count); http_reply(fd, "500 Internal Server Error", "{}"); return; }
     const char *et = json_escape(m->title);
-    off += snprintf(json + off, cap - off, "\"%s\"", et);
+    snprintf(json, cap, "{\"t\":\"%s\",\"s1\":%s,\"s2\":%s,\"trk\":%s}",
+             et ? et : "", s1txt, s2txt, have_trk ? trk : "null");
     free((void*)et);
-    off += snprintf(json + off, cap - off, ",\"s1\":[");
-    for (int i = 0; i < n; i++) {
-        const char *v = (i < c1 && m->shift1[i]) ? m->shift1[i] : "";
-        const char *ev = json_escape(v);
-        off += snprintf(json + off, cap - off, "%s\"%s\"", i ? "," : "", ev);
-        free((void*)ev);
-    }
-    off += snprintf(json + off, cap - off, "],\"s2\":[");
-    for (int i = 0; i < n; i++) {
-        const char *v = (i < c2 && m->shift2[i]) ? m->shift2[i] : "";
-        const char *ev = json_escape(v);
-        off += snprintf(json + off, cap - off, "%s\"%s\"", i ? "," : "", ev);
-        free((void*)ev);
-    }
-    off += snprintf(json + off, cap - off, "],\"trk\":%s}",
-                    have_trk ? trk : "null");
 
     char hdr[256];
     int hlen = snprintf(hdr, sizeof(hdr),
@@ -1083,6 +1173,7 @@ static void api_month(int fd, const char *query) {
     write(fd, hdr, hlen);
     write(fd, json, strlen(json));
     free(json);
+    free_months(mo, count);
 }
 
 /* Отдаёт JSON коллег по кабинету и дню:
@@ -1145,7 +1236,15 @@ static void api_cabinet(int fd, const char *query) {
     free(em);
     off += snprintf(json + off, cap - off, "\",\"day\":%d,\"shift\":\"%s\",\"colleagues\":", day, shift);
 
-    int n = find_cabinet_colleagues_from_index(month, day, cabinet, shift[0] ? shift : NULL, json + off, cap - off - 1);
+    /* Этап 2: коллеги из Supabase; при недоступности — индексный файл */
+    int n = -1;
+    if (sb_enabled())
+        n = sb_read_colleagues(month, day, cabinet, shift[0] ? shift : NULL,
+                               json + off, cap - off - 1);
+    if (n < 0)
+        n = find_cabinet_colleagues_from_index(month, day, cabinet,
+                                               shift[0] ? shift : NULL,
+                                               json + off, cap - off - 1);
     off += n;
 
     snprintf(json + off, cap - off, "}");
@@ -1457,20 +1556,27 @@ static int handle_conn(int client_fd) {
 }
 
 /* ==== Этап 1 плана Supabase: строки самого сотрудника в буфер ==== */
-/* Строка листа: [0]=имя, [1]=смена, [2..len-2]=кабинеты по дням, [len-1]=счётчик. */
-static void sb_add_row_cells(const char *month, char **cells, int len) {
+/* Строка листа: [0]=имя, [1]=смена, [2..]=кабинеты по дням,
+   позиция n-1 (n = max длины строк) — ячейка-счётчик «Всего смен».
+   Ровно по этой логике Mini App считает дни: days = n - 3.
+   limit — индекс счётчика (не включительно). */
+static void sb_add_row_cells(const char *month, char **cells, int len, int limit) {
     if (!cells || len < 3) return;
     const char *name = (cells[0] && cells[0][0]) ? cells[0] : SEARCH_NAME;
     if (!name || !name[0]) return;
     const char *shift = cells[1] ? cells[1] : "";
-    for (int d = 2; d < len - 1; d++)
+    int last = len < limit ? len : limit;
+    for (int d = 2; d < last; d++)
         if (cells[d] && cells[d][0])
             sb_row(month, d - 1, name, shift, cells[d]);
 }
 
 static void sb_add_month_rows(const MonthEntry *m) {
-    sb_add_row_cells(m->title, m->shift1, m->shift1_len);
-    sb_add_row_cells(m->title, m->shift2, m->shift2_len);
+    /* счётчик — по позиции max(длин строк): хвостовые пустые ячейки
+       одной строки не должны «съедать» последний день другой */
+    int n = m->shift1_len > m->shift2_len ? m->shift1_len : m->shift2_len;
+    sb_add_row_cells(m->title, m->shift1, m->shift1_len, n - 1);
+    sb_add_row_cells(m->title, m->shift2, m->shift2_len, n - 1);
 }
 
 /* ================================================================
