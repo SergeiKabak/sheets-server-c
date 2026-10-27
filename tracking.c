@@ -21,7 +21,6 @@
 #include <stdarg.h>
 #include <sys/stat.h>
 #include "http.h"
-#include "cJSON.h"
 #include "supabase.h"
 
 static double atof_comm(const char *s) {
@@ -1363,58 +1362,6 @@ static void trk_reply(int fd, const char *status, const char *body) {
 
 /* ==== Этап 3 плана Supabase: учёт времени в time_entries ==== */
 
-/* cJSON-слияние: дни из fresh_json перекрывают дни объекта "days" в ответе. */
-static int trk_merge_days(char *out, size_t cap, const char *fresh_json) {
-    cJSON *resp = cJSON_Parse(out);
-    if (!resp) return -1;
-    cJSON *days = cJSON_GetObjectItemCaseSensitive(resp, "days");
-    cJSON *fresh = cJSON_Parse(fresh_json);
-    if (!cJSON_IsObject(days) || !cJSON_IsObject(fresh)) {
-        cJSON_Delete(fresh);
-        cJSON_Delete(resp);
-        return -1;
-    }
-    cJSON *it = NULL;
-    cJSON_ArrayForEach(it, fresh) {
-        if (!it->string || !*it->string) continue;
-        cJSON_DeleteItemFromObjectCaseSensitive(days, it->string);
-        cJSON *dup = cJSON_Duplicate(it, 1);
-        if (dup) cJSON_AddItemToObject(days, it->string, dup);
-    }
-    cJSON_Delete(fresh);
-
-    char *printed = cJSON_PrintUnformatted(resp);
-    cJSON_Delete(resp);
-    if (!printed) return -1;
-    int rc = -1;
-    size_t plen = strlen(printed);
-    if (plen < cap) { memcpy(out, printed, plen + 1); rc = 0; }
-    free(printed);
-    return rc;
-}
-
-/* Накладывает дни из time_entries поверх дней из кэша/Google:
-   БД даёт свежие отметки (write-through), кэш — историю (записи до этапа 3).
-   Недоступность БД игнорируется — работает прежний источник. */
-static void trk_merge_time_db(const char *tab, char *out, size_t cap) {
-    if (!sb_enabled() || !tab || !*tab) return;
-    char *et = url_encode(tab);
-    if (!et) return;
-    char path[600];
-    snprintf(path, sizeof(path),
-             "/time_entries?month=eq.%s&select=day,t_in,t_out,hours,amount&order=day",
-             et);
-    free(et);
-    int st = 0;
-    char *body = sb_get(path, &st);
-    if (!body || st < 200 || st > 299) { free(body); return; }
-    char fresh[16384];
-    int ok = (sb_time_days_json(body, fresh, sizeof(fresh)) == 0);
-    free(body);
-    if (!ok || strcmp(fresh, "{}") == 0) return;
-    trk_merge_days(out, cap, fresh);
-}
-
 /* Write-through: после УСПЕШНОЙ записи в Google дублируем день в Supabase.
    Ошибка БД не меняет ответ клиенту — только лог в sb_time_upsert(). */
 static void sb_write_time_day(const char *tab, int day,
@@ -1782,23 +1729,21 @@ int tracking_days_json(const char *month, char *out, size_t cap) {
         snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный месяц\"}");
         return 400;
     }
+    /* Слияние с time_entries убрано (вариант 1): БД и так полна — запись
+       идёт только ПОСЛЕ успешной записи в Google (write-through), поэтому
+       БД ⊆ Google и merge не добавлял данных, но стоил 0.6-0.9 с на каждый
+       вызов. Правки в дашборде Supabase в Mini App не отражаются — правьте
+       Time tracking в Google Sheets (первоисточник). */
     long t0 = now_ms();
     if (trk_cache_read(tab, out, cap, TRK_CACHE_TTL) == 0) {
-        long t1 = now_ms();
-        trk_merge_time_db(tab, out, cap);
-        fprintf(stderr, "[trk] days %s: cache %ldms merge %ldms\n",
-                tab, t1 - t0, now_ms() - t1);
+        fprintf(stderr, "[trk] days %s: cache %ldms\n", tab, now_ms() - t0);
         return 200;
     }
 
     int code = tracking_days_build(month, out, cap);
-    long t1 = now_ms();
-    if (code == 200) {
-        trk_cache_write(tab, out);
-        trk_merge_time_db(tab, out, cap);
-    }
-    fprintf(stderr, "[trk] days %s: google %ldms merge %ldms code=%d\n",
-            tab, t1 - t0, now_ms() - t1, code);
+    if (code == 200) trk_cache_write(tab, out);
+    fprintf(stderr, "[trk] days %s: google %ldms code=%d\n",
+            tab, now_ms() - t0, code);
     return code;
 }
 
