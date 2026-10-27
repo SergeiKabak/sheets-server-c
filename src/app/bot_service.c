@@ -2,9 +2,6 @@
 
 #include "app/month_cache.h"
 #include "vendor/cJSON.h"
-#include "core/json_text.h"
-#include "core/strbuf.h"
-#include "core/url_codec.h"
 #include "domain/schedule.h"
 #include "infra/telegram_api.h"
 
@@ -13,17 +10,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Клавиатура учёта времени (Пришла / Ушла / Деньги) в JSON-виде. */
-#define TRACK_KEYBOARD_JSON "{\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"},{\"text\":\"Деньги\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
+/* Клавиатура учёта времени (Пришла / Ушла) в JSON-виде. */
+#define TRACK_KEYBOARD_JSON "{\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
 
 /* Инлайн-клавиатура учёта времени. */
-#define TRACK_INLINE_JSON "{\"inline_keyboard\":[[{\"text\":\"Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"Ушла\",\"callback_data\":\"trk_out\"}],{\"text\":\"Деньги\",\"callback_data\":\"trk_money\"}]}"
+#define TRACK_INLINE_JSON "{\"inline_keyboard\":[[{\"text\":\"Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"Ушла\",\"callback_data\":\"trk_out\"}]]}"
 
 static const char HELP_MSG[] =
     "Привет! Я бот-график смен.\n\n"
     "График — кнопка меню чата\n"
-    "Отметить время — кнопки внизу\n"
-    "Деньги — заработок по месяцам";
+    "Отметить время — кнопки внизу";
 
 void bot_service_init(BotService *bot, const AppConfig *cfg,
                        TrackingService *tracking) {
@@ -60,74 +56,6 @@ static void send_track_menu(BotService *bot, long long chat_id) {
 static void send_track_inline(BotService *bot, long long chat_id) {
     telegram_send_text_markup(bot->cfg->bot_token, chat_id,
                                "Отметьте рабочее время:", TRACK_INLINE_JSON);
-}
-
-/* Меню выбора месяца для раздела «Деньги». */
-static void send_money_menu(BotService *bot, long long chat_id) {
-    char **months = NULL;
-    int count = 0;
-    if (tracking_list_months(bot->tracking, &months, &count, 24) != 0 || count == 0) {
-        send_text(bot, chat_id,
-                  "Не удалось получить список месяцев. Проверьте доступ к таблице.");
-        return;
-    }
-
-    StrBuf kb;
-    sbuf_init(&kb);
-    sbuf_append(&kb, "{\"inline_keyboard\":[[");
-    int in_row = 0;
-    for (int i = 0; i < count; i++) {
-        char label[64];
-        tracking_month_label(months[i], label, sizeof(label));
-        if (in_row) sbuf_append(&kb, ",");
-        sbuf_append(&kb, "{\"text\":");
-        sbuf_append_json_string(&kb, label);
-        sbuf_append(&kb, ",\"callback_data\":");
-        char *cd = json_escape(months[i]);
-        sbuf_append_json_string(&kb, cd ? cd : months[i]);
-        free(cd);
-        sbuf_append(&kb, "}");
-        in_row++;
-        if (in_row == 3 && i < count - 1) {
-            sbuf_append(&kb, "],[");
-            in_row = 0;
-        }
-    }
-    sbuf_append(&kb, "]]}");
-    char *markup = sbuf_take(&kb);
-
-    if (markup) {
-        telegram_send_text_markup(bot->cfg->bot_token, chat_id,
-                                   "Заработок по месяцам — выберите месяц:", markup);
-        free(markup);
-    }
-
-    for (int i = 0; i < count; i++) free(months[i]);
-    free(months);
-}
-
-/* Присылает в чат итог по выбранному месяцу. */
-static void send_money_total(BotService *bot, long long chat_id, const char *month) {
-    double hours = 0, sum = 0;
-    int days = 0;
-    char label[64];
-    tracking_month_label(month, label, sizeof(label));
-
-    if (tracking_month_total(bot->tracking, month, &hours, &sum, &days) != 0) {
-        send_text(bot, chat_id, "Не удалось посчитать заработок за этот месяц.");
-        return;
-    }
-    if (days <= 0 && sum <= 0) {
-        char msg[256];
-        snprintf(msg, sizeof(msg), "%s: отметок нет.", label);
-        send_text_kb(bot, chat_id, msg);
-        return;
-    }
-    char msg[512];
-    snprintf(msg, sizeof(msg),
-             "%s\nОтработано: %.2f ч. за %d дн.\nЗаработано: %.2f",
-             label, hours, days, sum);
-    send_text_kb(bot, chat_id, msg);
 }
 
 /* Выполняет отметку и отправляет результат в чат. */
@@ -232,9 +160,6 @@ void bot_process_update(BotService *bot, const char *body) {
                 bot_track(bot, cid, "in");
             } else if (strstr(text, "Ушла") || strcmp(low, "/out") == 0) {
                 bot_track(bot, cid, "out");
-            } else if (strstr(text, "Деньги") || strcmp(low, "/money") == 0 ||
-                       strcmp(low, "/zarabotok") == 0) {
-                send_money_menu(bot, cid);
             } else if (strstr(low, "/track") || strstr(low, "/time") ||
                        strstr(text, "Отметить") || strstr(text, "время")) {
                 send_track_inline(bot, cid);
@@ -280,22 +205,6 @@ void bot_process_update(BotService *bot, const char *body) {
             if (strcmp(data, "trk_out") == 0) {
                 bot_track(bot, cid, "out");
                 if (cqid) telegram_answer_callback(bot->cfg->bot_token, cqid, "Записано");
-                month_schedules_free(months, count);
-                cJSON_Delete(root);
-                return;
-            }
-            /* Кнопка «Деньги»: показать список месяцев */
-            if (strcmp(data, "trk_money") == 0) {
-                send_money_menu(bot, cid);
-                if (cqid) telegram_answer_callback(bot->cfg->bot_token, cqid, NULL);
-                month_schedules_free(months, count);
-                cJSON_Delete(root);
-                return;
-            }
-            /* Выбран месяц: присылаем сумму заработка за него */
-            if (strncmp(data, "mon:", 4) == 0) {
-                send_money_total(bot, cid, data + 4);
-                if (cqid) telegram_answer_callback(bot->cfg->bot_token, cqid, NULL);
                 month_schedules_free(months, count);
                 cJSON_Delete(root);
                 return;
