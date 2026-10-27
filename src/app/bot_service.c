@@ -329,7 +329,8 @@ void bot_process_update(BotService *bot, const char *body) {
                 bot_track(bot, cid, "in");
             } else if (strstr(text, "Ушла") || strcmp(low, "/out") == 0) {
                 bot_track(bot, cid, "out");
-            } else if (strstr(low, "/remind") || strstr(text, "Напомин")) {
+            } else if (strstr(low, "/remind") || strstr(text, "Напомн") ||
+                       strstr(text, "напомн")) {
                 send_remind_menu(bot, cid);
             } else if (strstr(low, "/track") || strstr(low, "/time") ||
                        strstr(text, "Отметить") || strstr(text, "время")) {

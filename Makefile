@@ -29,7 +29,7 @@ TARGET_NATIVE = server_app
 SRC = $(shell find src -name '*.c' | sort)
 INCLUDES = -Isrc
 
-.PHONY: all build run clean test test-js test-supabase test-core test-reminders
+.PHONY: all build run clean test test-js test-supabase test-core test-reminders test-bot
 
 all: build
 
@@ -59,7 +59,7 @@ run: build
 	fi
 
 # Тесты (C-часть: нужен libcurl с GNU-именем -l:libcurl.so.4, т.е. Linux)
-test: test-reminders
+test: test-reminders test-bot
 	bash tests/run.sh
 
 # Тесты JS-части Mini App (нужны node и jsdom: npm i --no-save jsdom)
@@ -74,6 +74,12 @@ test-supabase:
 		src/core/shift.c src/core/date_time.c \
 		src/domain/schedule.c src/domain/time_entry.c \
 		src/vendor/cJSON.c -o /tmp/test_supabase $(CURL_LIB) && /tmp/test_supabase
+
+# Юнит-тест маршрутизации сообщений бота (Telegram подменён заглушками)
+test-bot:
+	$(CC_NATIVE) -O0 -g -Wall -Wextra $(INCLUDES) tests/test_bot_routing.c \
+		$$(find src -name '*.c' ! -name 'main.c' ! -name 'telegram_api.c') \
+		-o /tmp/test_bot_routing $(CURL_LIB) && /tmp/test_bot_routing
 
 # Юнит-тест планирования напоминаний (чистая логика, без сети/БД)
 test-reminders:
