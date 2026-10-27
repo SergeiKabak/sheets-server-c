@@ -130,7 +130,12 @@ static SBucket *bucket(const char *month) {
 void sb_row(const char *month, int day, const char *employee,
             const char *shift, const char *cabinet) {
     if (!sb_on || !month || !*month || day < 1 || day > 31) return;
-    if (!employee || !*employee || !cabinet || !*cabinet) return;
+    /* Фильтр валидности (согласован): строка в базу попадает только если
+       employee И shift_time непустые. Служебные строки листа («Всего дней
+       в месяце», «Кабинет 1.1 (1-я смена)», «Смен в К1», итоги/проценты)
+       имеют пустую смену и отсекаются. Пустое имя уже отсекалось. */
+    if (!employee || !*employee || !shift || !*shift) return;
+    if (!cabinet || !*cabinet) return;
 
     SBucket *b = bucket(month);
     if (!b) return;
