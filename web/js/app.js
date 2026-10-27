@@ -40,6 +40,23 @@
     for (var j = 0; j < kids.length; j++) kids[j].classList.toggle('active', j === S.cur);
   }
 
+  var MONTH_NAMES = ['Январь','Февраль','Март','Апрель','Май','Июнь',
+                      'Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+
+  /* Подпись текущего месяца в формате списка («Октябрь 2026»). */
+  function currentMonthLabel() {
+    var d = new Date();
+    return MONTH_NAMES[d.getMonth()] + ' ' + d.getFullYear();
+  }
+
+  /* Текущий месяц по умолчанию; если его нет в списке — первый. */
+  function defaultIndex() {
+    var cur = currentMonthLabel();
+    for (var i = 0; i < S.M.length; i++)
+      if (S.M[i] === cur) return i;
+    return Math.max(0, S.M.length - 1);
+  }
+
   function load(i) {
     if (i < 0 || i >= S.M.length) return;
     S.cur = i;
@@ -63,7 +80,7 @@
     }
     A.api.months().then(function (d) {
       S.M = (d && d.months) || [];
-      if (S.M.length) load(S.M.length - 1);
+      if (S.M.length) load(defaultIndex());
       else alert('Нет данных');
     });
   }
