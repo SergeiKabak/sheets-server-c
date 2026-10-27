@@ -169,11 +169,11 @@ int http_request(const char *method, const char *url,
     return (rc == CURLE_OK) ? (int)http_code : 0;
 }
 
-/* Универсальный запрос с возвратом тела ответа и HTTP-кода.
-   caller отвечает за free(out). */
-char *http_request_full(const char *method, const char *url,
+/* Универсальный запрос с дополнительными заголовками.
+   extra — NULL-terminated массив строк "Name: value". */
+char *http_request_h(const char *method, const char *url,
                  const char *content_type, const char *body,
-                 const char *bearer, int *status) {
+                 const char *const *extra, int *status) {
     if (status) *status = 0;
     CURL *curl = curl_easy_init();
     if (!curl) return NULL;
@@ -184,11 +184,9 @@ char *http_request_full(const char *method, const char *url,
         snprintf(h, sizeof(h), "Content-Type: %s", content_type);
         headers = curl_slist_append(headers, h);
     }
-    if (bearer && *bearer) {
-        char h[512];
-        snprintf(h, sizeof(h), "Authorization: Bearer %s", bearer);
-        headers = curl_slist_append(headers, h);
-    }
+    if (extra)
+        for (int i = 0; extra[i]; i++)
+            headers = curl_slist_append(headers, extra[i]);
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -217,4 +215,18 @@ char *http_request_full(const char *method, const char *url,
     }
     set_http_code(http_code, status);
     return buf;
+}
+
+/* Универсальный запрос с возвратом тела ответа и HTTP-кода.
+   caller отвечает за free(out). */
+char *http_request_full(const char *method, const char *url,
+                 const char *content_type, const char *body,
+                 const char *bearer, int *status) {
+    char auth[520];
+    const char *extra[2] = { NULL, NULL };
+    if (bearer && *bearer) {
+        snprintf(auth, sizeof(auth), "Authorization: Bearer %s", bearer);
+        extra[0] = auth;
+    }
+    return http_request_h(method, url, content_type, body, extra, status);
 }

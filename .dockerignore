@@ -1,6 +1,7 @@
 # Exclude from Docker build context
 .git
 .gitignore
+.env
 *.md
 server
 server_mac

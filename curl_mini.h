@@ -1,3 +1,8 @@
+/* Минимальный шим <curl/curl.h> для сборки без libcurl-dev.
+   Значения сверены с настоящим curl.h (macOS/Xcode 17, libcurl 8.7.1):
+   5 констант были неверны — из-за этого CURLINFO_RESPONSE_CODE не
+   распознавался, код HTTP-ответа всегда терялся (0 -> «200» в set_http_code)
+   и все проверки status == 200 в коде видели всегда успешный ответ. */
 #ifndef CURL_MINI_H
 #define CURL_MINI_H
 
@@ -10,25 +15,25 @@ typedef int CURLcode;
 
 typedef enum {
     CURLOPT_OK = 0,
-    CURLOPT_URL = 10002,
-    CURLOPT_WRITEFUNCTION = 20011,
-    CURLOPT_WRITEDATA = 10001,
-    CURLOPT_HEADERFUNCTION = 20027,
-    CURLOPT_HEADERDATA = 10029,
-    CURLOPT_POSTFIELDS = 10015,
-    CURLOPT_POSTFIELDSIZE = 10014,
-    CURLOPT_HTTPHEADER = 10023,
+    CURLOPT_URL = 10002,            /* OBJECTPOINT + 2 */
+    CURLOPT_WRITEFUNCTION = 20011,  /* FUNCTIONPOINT + 11 */
+    CURLOPT_WRITEDATA = 10001,      /* OBJECTPOINT + 1 */
+    CURLOPT_HEADERFUNCTION = 20079, /* FUNCTIONPOINT + 79 */
+    CURLOPT_HEADERDATA = 10029,     /* OBJECTPOINT + 29 */
+    CURLOPT_POSTFIELDS = 10015,     /* OBJECTPOINT + 15 */
+    CURLOPT_POSTFIELDSIZE = 60,     /* LONG + 60 */
+    CURLOPT_HTTPHEADER = 10023,     /* OBJECTPOINT + 23 */
     CURLOPT_HTTPHEADER_OLD = 10023,
-    CURLOPT_CUSTOMREQUEST = 10036,
-    CURLOPT_SSL_VERIFYPEER = 81,
-    CURLOPT_TIMEOUT = 13,
-    CURLOPT_FOLLOWLOCATION = 52,
-    CURLOPT_HTTPGET = 80,
-    CURLOPT_POST = 41
+    CURLOPT_CUSTOMREQUEST = 10036,  /* OBJECTPOINT + 36 */
+    CURLOPT_SSL_VERIFYPEER = 64,    /* LONG + 64 */
+    CURLOPT_TIMEOUT = 13,           /* LONG + 13 */
+    CURLOPT_FOLLOWLOCATION = 52,    /* LONG + 52 */
+    CURLOPT_HTTPGET = 80,           /* LONG + 80 */
+    CURLOPT_POST = 47               /* LONG + 47 */
 } CURLoption;
 
 typedef enum {
-    CURLINFO_RESPONSE_CODE = 2097
+    CURLINFO_RESPONSE_CODE = 2097154  /* CURLINFO_LONG(0x200000) | 2 */
 } CURLINFO;
 
 struct curl_slist {

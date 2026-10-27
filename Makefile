@@ -10,9 +10,9 @@ CFLAGS_NATIVE = -O2 -Wall -Wextra
 
 TARGET_ARM = sheet
 TARGET_NATIVE = server_app
-SRC = main.c tracking.c cJSON.c http.c
+SRC = main.c tracking.c cJSON.c http.c supabase.c
 
-.PHONY: all build run clean test test-js
+.PHONY: all build run clean test test-js test-supabase
 
 all: build
 
@@ -48,6 +48,11 @@ test:
 # Тесты JS-части Mini App (нужны node и jsdom: npm i --no-save jsdom)
 test-js:
 	node tests/test_miniapp.js
+
+# Юнит-тест буфера Supabase (офлайн, без сети)
+test-supabase:
+	$(CC_NATIVE) -O0 -g -Wall -Wextra -I. tests/test_supabase.c supabase.c http.c \
+		-o /tmp/test_supabase -lcurl && /tmp/test_supabase
 
 clean:
 	rm -f $(TARGET_ARM) $(TARGET_NATIVE)

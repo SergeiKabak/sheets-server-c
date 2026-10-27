@@ -15,4 +15,11 @@ char *http_request_full(const char *method, const char *url,
                  const char *content_type, const char *body,
                  const char *bearer, int *status);
 
+/* Запрос с дополнительными заголовками (например apikey/Prefer для Supabase).
+   extra — NULL-terminated массив строк вида "Name: value".
+   caller отвечает за free(out). */
+char *http_request_h(const char *method, const char *url,
+                 const char *content_type, const char *body,
+                 const char *const *extra, int *status);
+
 #endif /* HTTP_H */

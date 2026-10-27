@@ -22,6 +22,7 @@
 
 #include "tracking.h"
 #include "http.h"
+#include "supabase.h"
 
 #define CACHE_TTL 60
 #define BUFFER_SIZE (512 * 1024)
@@ -345,8 +346,9 @@ static int build_months(MonthEntry *out, int max, FILE *idx) {
 
         /* Индекс кабинетов по ВСЕМ строкам листа.
            У человека две строки: утренняя (в графе C имя) и вечерняя
-           (имя пустое — наследуется от предыдущей строки). */
-        if (idx) {
+           (имя пустое — наследуется от предыдущей строки).
+           Те же строки параллельно накапливаются для буфера Supabase (этап 1). */
+        if (idx || sb_enabled()) {
             const char *cur_name = "";
             for (int r = 0; r < row_count; r++) {
                 char **row = (char **)rows[r];
@@ -360,8 +362,11 @@ static int build_months(MonthEntry *out, int max, FILE *idx) {
                 for (int d = 2; d < rlen; d++) {
                     const char *cabinet = row[d] ? row[d] : "";
                     if (!*cabinet) continue;
-                    fprintf(idx, "%s\t%d\t%s\t%s\t%s\n",
-                            sheets[i], d - 1, cabinet, cur_name, shift);
+                    if (idx)
+                        fprintf(idx, "%s\t%d\t%s\t%s\t%s\n",
+                                sheets[i], d - 1, cabinet, cur_name, shift);
+                    if (sb_enabled())
+                        sb_row(sheets[i], d - 1, cur_name, shift, cabinet);
                 }
             }
         }
@@ -1451,6 +1456,23 @@ static int handle_conn(int client_fd) {
     return 0;
 }
 
+/* ==== Этап 1 плана Supabase: строки самого сотрудника в буфер ==== */
+/* Строка листа: [0]=имя, [1]=смена, [2..len-2]=кабинеты по дням, [len-1]=счётчик. */
+static void sb_add_row_cells(const char *month, char **cells, int len) {
+    if (!cells || len < 3) return;
+    const char *name = (cells[0] && cells[0][0]) ? cells[0] : SEARCH_NAME;
+    if (!name || !name[0]) return;
+    const char *shift = cells[1] ? cells[1] : "";
+    for (int d = 2; d < len - 1; d++)
+        if (cells[d] && cells[d][0])
+            sb_row(month, d - 1, name, shift, cells[d]);
+}
+
+static void sb_add_month_rows(const MonthEntry *m) {
+    sb_add_row_cells(m->title, m->shift1, m->shift1_len);
+    sb_add_row_cells(m->title, m->shift2, m->shift2_len);
+}
+
 /* ================================================================
  * Фоновое обновление кэша каждые CACHE_TTL секунд
  * ================================================================ */
@@ -1458,11 +1480,31 @@ static void background_updater(void) {
     MonthEntry mo[MAX_MONTHS];
     for (;;) {
         memset(mo, 0, sizeof(mo));
+        sb_begin_cycle();   /* updated_at текущего цикла — ДО сбора строк */
         FILE *idx = fopen(CABINET_INDEX_FILE, "w");
         int c = build_months(mo, MAX_MONTHS, idx);
         if (idx) { fclose(idx); fprintf(stderr, "[cabinet] index saved\n"); }
         save_months(mo, c);
         fprintf(stderr, "[updater] months cached: %d\n", c);
+
+        /* Буфер графика в Supabase: upsert строк месяца + уборка устаревших */
+        if (sb_enabled()) {
+            const char *titles[MAX_MONTHS];
+            int nt = 0;
+            for (int i = 0; i < c && nt < MAX_MONTHS; i++) {
+                titles[nt++] = mo[i].title;
+                sb_add_month_rows(&mo[i]);
+            }
+            int errs = 0;
+            int rows = sb_flush(titles, nt, &errs);
+            fprintf(stderr, "[sync] supabase schedule: rows=%d errors=%d\n", rows, errs);
+            static int cycle = 0;
+            cycle++;
+            /* пульс в sync_log каждые ~10 мин + любая ошибка отдельно */
+            if (errs || cycle % 10 == 0)
+                sb_log("schedule", "", rows, errs == 0,
+                       errs ? "HTTP error при синхронизации графика" : "");
+        }
 
         /* Тот же цикл обновляет и кэш отметок Time tracking, чтобы Mini App
            не ждал Google при переключении месяца. */
@@ -1488,6 +1530,7 @@ int main(void) {
     if (port_env) port = atoi(port_env);
 
     init_config();
+    sb_init();               /* буфер графика в Supabase (этап 1) */
 
     fprintf(stderr, "[build] cabinet-index-v2 (all rows, name inheritance, shift overlap)\n");
     fprintf(stderr, "[config] SHEET=%s FROM=%s TO=%s SEARCH_NAME='%s'\n",
