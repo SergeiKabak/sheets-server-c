@@ -1115,6 +1115,79 @@ static int build_month_arrays_json(const MonthEntry *m,
     return 0;
 }
 
+/* ==== Кэш готовых ответов месяцев: ускорение /api/month ====
+   Сам запрос раньше ходил в Supabase REST (плюс TLS-handshake на каждый
+   fork-процесс) и стоил ~0.7-1 c TTFB. Теперь готовые массивы s1/s2 кладутся
+   в /tmp/mresp_<hex>.json: их пишет фоновый цикл (свежесть <= 60 с, как у
+   всех кэшей) и лениво сам запрос при промахе. Отметки (trk) в кэш НЕ входят:
+   они берутся из своего кэша, который инвалидируется при записи. */
+#define MONTH_RESP_TTL 600   /* старше 10 минут — не доверяем, строим заново */
+
+/* Имя файла: hex первых 48 байт заголовка листа — безопасно, без коллизий */
+static int month_resp_path(const char *title, char *out, size_t cap) {
+    if (!title || !*title) return -1;
+    static const char *H = "0123456789abcdef";
+    char hex[97];
+    int o = 0;
+    for (const unsigned char *p = (const unsigned char *)title; *p && o < 96; p++) {
+        hex[o++] = H[*p >> 4];
+        hex[o++] = H[*p & 0x0F];
+    }
+    hex[o] = '\0';
+    int n = snprintf(out, cap, "/tmp/mresp_%s.json", hex);
+    return (n > 0 && (size_t)n < cap) ? 0 : -1;
+}
+
+/* Пишет {"t":...,"s1":[...],"s2":[...]} атомарно (tmp + rename) */
+static int month_resp_write(const char *title, const char *s1, const char *s2) {
+    char path[256], tmp[300];
+    if (month_resp_path(title, path, sizeof(path)) != 0) return -1;
+    snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int)getpid());
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return -1;
+    const char *et = json_escape(title);
+    int n = fprintf(f, "{\"t\":\"%s\",\"s1\":%s,\"s2\":%s}", et ? et : "", s1, s2);
+    free((void*)et);
+    fclose(f);
+    if (n < 0 || rename(tmp, path) != 0) { remove(tmp); return -1; }
+    return 0;
+}
+
+/* Читает кэш ответа (без trk) в out; -1 если нет/устарел/повреждён */
+static int month_resp_read(const char *title, char *out, size_t cap) {
+    char path[256];
+    if (month_resp_path(title, path, sizeof(path)) != 0) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    if (time(NULL) - st.st_mtime > MONTH_RESP_TTL) return -1;
+    if (st.st_size < 16 || (size_t)st.st_size >= cap) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t got = fread(out, 1, (size_t)st.st_size, f);
+    fclose(f);
+    out[got] = '\0';
+    if (got < 16 || out[got - 1] != '}') return -1;
+    return 0;
+}
+
+/* Массивы s1/s2 месяца: Supabase (этап 2), при недоступности — файловый кэш.
+   0 — успех (структура листа: n = max(длин строк), дней = n-3,
+   счётчик «Всего смен» — из листа). */
+static int month_s1s2(const MonthEntry *m,
+                      char *s1, size_t s1cap, char *s2, size_t s2cap) {
+    int c1 = m->shift1_len, c2 = m->shift2_len;
+    int n = c1 > c2 ? c1 : c2;
+    if (n < 1) n = 1;
+    char total1[64] = "";
+    if (m->shift1 && c1 > 0 && m->shift1[c1 - 1])
+        snprintf(total1, sizeof(total1), "%s", m->shift1[c1 - 1]);
+
+    if (sb_enabled() && SEARCH_NAME && *SEARCH_NAME &&
+        sb_read_month(m->title, SEARCH_NAME, n - 3, total1, s1, s1cap, s2, s2cap) == 0)
+        return 0;
+    return build_month_arrays_json(m, s1, s1cap, s2, s2cap);
+}
+
 static void api_month(int fd, const char *query) {
     const char *p = strstr(query, "name=");
     if (!p) { http_reply(fd, "400 Bad Request", "{\"error\":\"не указано имя\"}"); return; }
@@ -1133,41 +1206,42 @@ static void api_month(int fd, const char *query) {
 
     MonthEntry *m = &mo[idx];
 
-    /* Отметки Time tracking берём из локального кэша (его обновляет
-       background_updater раз в 60 с). Если кэша нет — клиент запросит
-       /api/tracking/days и получит данные напрямую из Google. */
+    /* Отметки Time tracking — из своего кэша (обновляется фоновым циклом,
+       инвалидируется при записи — поэтому их НЕ кэшируем в mresp) */
     char trk[16384];
     int have_trk = (tracking_days_cached_json(m->title, trk, sizeof(trk)) == 0);
 
-    /* структура листа: n ячеек = имя + смена + дни + счётчик -> дней = n-3;
-       листовой счётчик «Всего смен» — в последней ячейке первой строки */
-    int c1 = m->shift1_len, c2 = m->shift2_len;
-    int n = c1 > c2 ? c1 : c2;
-    if (n < 1) n = 1;
-    char total1[64] = "";
-    if (m->shift1 && c1 > 0 && m->shift1[c1 - 1])
-        snprintf(total1, sizeof(total1), "%s", m->shift1[c1 - 1]);
-
-    /* Этап 2: массивы месяца — из Supabase; при недоступности — файловый кэш */
+    /* Ответ графика: кэш готового ответа -> мгновенно, без HTTP к Supabase;
+       при промахе строим (Supabase -> файловый кэш) и кладём в кэш */
+    char cached[16384];
     char s1txt[16384] = "";
     char s2txt[16384] = "";
-    int from_db = 0;
-    if (sb_enabled() && SEARCH_NAME && *SEARCH_NAME)
-        from_db = (sb_read_month(m->title, SEARCH_NAME, n - 3, total1,
-                                 s1txt, sizeof(s1txt), s2txt, sizeof(s2txt)) == 0);
-    if (!from_db && build_month_arrays_json(m, s1txt, sizeof(s1txt), s2txt, sizeof(s2txt)) != 0) {
-        free_months(mo, count);
-        http_reply(fd, "500 Internal Server Error", "{\"error\":\"нет данных месяца\"}");
-        return;
+    int use_cache = (month_resp_read(m->title, cached, sizeof(cached)) == 0);
+    if (!use_cache) {
+        if (month_s1s2(m, s1txt, sizeof(s1txt), s2txt, sizeof(s2txt)) != 0) {
+            free_months(mo, count);
+            http_reply(fd, "500 Internal Server Error", "{\"error\":\"нет данных месяца\"}");
+            return;
+        }
+        month_resp_write(m->title, s1txt, s2txt);
+        fprintf(stderr, "[cache] month '%s' -> mresp (supabase/file)\n", m->title);
     }
 
-    size_t cap = 256 + strlen(s1txt) + strlen(s2txt) + (have_trk ? strlen(trk) : 4);
+    size_t base = use_cache ? strlen(cached) : (strlen(s1txt) + strlen(s2txt) + 64);
+    size_t cap = 256 + base + (have_trk ? strlen(trk) : 4);
     char *json = malloc(cap);
     if (!json) { free_months(mo, count); http_reply(fd, "500 Internal Server Error", "{}"); return; }
-    const char *et = json_escape(m->title);
-    snprintf(json, cap, "{\"t\":\"%s\",\"s1\":%s,\"s2\":%s,\"trk\":%s}",
-             et ? et : "", s1txt, s2txt, have_trk ? trk : "null");
-    free((void*)et);
+    if (use_cache) {
+        /* cached = {"t":..,"s1":[..],"s2":[..]} — срезаем последнюю скобку
+           и вставляем trk из своего кэша */
+        snprintf(json, cap, "%.*s,\"trk\":%s}", (int)(strlen(cached) - 1), cached,
+                 have_trk ? trk : "null");
+    } else {
+        const char *et = json_escape(m->title);
+        snprintf(json, cap, "{\"t\":\"%s\",\"s1\":%s,\"s2\":%s,\"trk\":%s}",
+                 et ? et : "", s1txt, s2txt, have_trk ? trk : "null");
+        free((void*)et);
+    }
 
     char hdr[256];
     int hlen = snprintf(hdr, sizeof(hdr),
@@ -1667,6 +1741,21 @@ static void background_updater(void) {
                            errs ? "HTTP error при восстановлении time_entries" : "");
             }
         }
+        /* Кэш готовых ответов месяцев: /api/month отдаётся из файла
+           мгновенно (REST+TLS к Supabase на запрос стоили ~0.7-1 c).
+           Пишем всегда — при выключенной Supabase источником станет
+           файловый кэш месяцев. */
+        if (c > 0) {
+            char s1b[16384], s2b[16384];
+            int cached_n = 0;
+            for (int i = 0; i < c; i++) {
+                if (month_s1s2(&mo[i], s1b, sizeof(s1b), s2b, sizeof(s2b)) == 0 &&
+                    month_resp_write(mo[i].title, s1b, s2b) == 0)
+                    cached_n++;
+            }
+            fprintf(stderr, "[updater] month responses cached: %d\n", cached_n);
+        }
+
         free_months(mo, c);
 
         /* Кнопка меню чата (доступ к графику-таблице) ставится периодически:
