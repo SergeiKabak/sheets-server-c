@@ -169,12 +169,32 @@ int http_request(const char *method, const char *url,
     return (rc == CURLE_OK) ? (int)http_code : 0;
 }
 
+/* Контейнер для копирования заголовков ответа (нужен Content-Range
+   для точных счётчиков PostgREST: Prefer: count=exact) */
+struct hd_store { char *buf; size_t cap; };
+
+static size_t header_store_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    struct hd_store *s = (struct hd_store *)userdata;
+    size_t need = size * nmemb;
+    if (!s || !s->buf || s->cap == 0) return need;
+    size_t cur = strlen(s->buf);
+    if (cur + 1 < s->cap) {
+        size_t room = s->cap - cur - 1;
+        size_t copy = need < room ? need : room;
+        memcpy(s->buf + cur, ptr, copy);
+        s->buf[cur + copy] = '\0';
+    }
+    return need;
+}
+
 /* Универсальный запрос с дополнительными заголовками.
    extra — NULL-terminated массив строк "Name: value". */
 char *http_request_h(const char *method, const char *url,
                  const char *content_type, const char *body,
-                 const char *const *extra, int *status) {
+                 const char *const *extra, int *status,
+                 char *hdr_out, size_t hdr_cap) {
     if (status) *status = 0;
+    if (hdr_out && hdr_cap) hdr_out[0] = '\0';
     CURL *curl = curl_easy_init();
     if (!curl) return NULL;
 
@@ -195,7 +215,14 @@ char *http_request_h(const char *method, const char *url,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 25L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+
+    struct hd_store store = { hdr_out, hdr_cap };
+    if (hdr_out && hdr_cap) {
+        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_store_cb);
+        curl_easy_setopt(curl, CURLOPT_HEADERDATA, &store);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+    }
 
     char *buf = malloc(1);
     if (!buf) { curl_slist_free_all(headers); curl_easy_cleanup(curl); return NULL; }
@@ -228,5 +255,5 @@ char *http_request_full(const char *method, const char *url,
         snprintf(auth, sizeof(auth), "Authorization: Bearer %s", bearer);
         extra[0] = auth;
     }
-    return http_request_h(method, url, content_type, body, extra, status);
+    return http_request_h(method, url, content_type, body, extra, status, NULL, 0);
 }

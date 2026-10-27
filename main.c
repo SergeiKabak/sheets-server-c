@@ -1536,6 +1536,23 @@ static int handle_conn(int client_fd) {
         http_reply(client_fd, "200 OK", body);
         return 0;
     }
+    if (strcmp(path, "/diag/supabase") == 0) {
+        /* Диагностика буфера Supabase: точные счётчики (Content-Range),
+           пульс sync_log, состояние time_entries. Только чтение. */
+        MonthEntry mo[MAX_MONTHS];
+        memset(mo, 0, sizeof(mo));
+        int c = read_months(mo, MAX_MONTHS);
+        const char *titles[MAX_MONTHS];
+        int nt = 0;
+        for (int i = 0; i < c && nt < MAX_MONTHS; i++) titles[nt++] = mo[i].title;
+        char body[8192];
+        if (sb_diag(titles, nt, body, sizeof(body)) != 0 && !strstr(body, "\"ok\"")) {
+            snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"диагностика недоступна\"}");
+        }
+        free_months(mo, c);
+        http_reply(client_fd, "200 OK", body);
+        return 0;
+    }
     if (strcmp(path, "/diag") == 0) {
         char body[1024];
         char *resp = diag_google();

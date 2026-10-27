@@ -96,4 +96,11 @@ int sb_time_days_json(const char *rows_json, char *out, size_t outcap);
    -1 — ошибка (разбор/HTTP); *errors (не NULL) — счётчик ошибок. */
 int sb_time_restore(const char *days_json, int *errors);
 
+/* Диагностика для GET /diag/supabase (ручной мониторинг между этапами):
+   точные счётчики schedule (всего/валидных/служебных), построчно по месяцам,
+   time_entries, последняя запись и последний restore из sync_log с возрастом
+   (пульс). months/nmonths — месяцы из файлового кэша.
+   Возвращает 0, -1 если общий счёт не получен или sync выключен. */
+int sb_diag(const char *const *months, int nmonths, char *out, size_t cap);
+
 #endif /* SUPABASE_H */

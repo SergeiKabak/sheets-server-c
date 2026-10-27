@@ -17,9 +17,12 @@ char *http_request_full(const char *method, const char *url,
 
 /* Запрос с дополнительными заголовками (например apikey/Prefer для Supabase).
    extra — NULL-terminated массив строк вида "Name: value".
+   hdr_out/hdr_cap (можно NULL/0) — сюда копируются заголовки ответа
+   (нужен, например, Content-Range для точных счётчиков PostgREST).
    caller отвечает за free(out). */
 char *http_request_h(const char *method, const char *url,
                  const char *content_type, const char *body,
-                 const char *const *extra, int *status);
+                 const char *const *extra, int *status,
+                 char *hdr_out, size_t hdr_cap);
 
 #endif /* HTTP_H */

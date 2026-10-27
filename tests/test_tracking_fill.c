@@ -37,8 +37,10 @@ char *url_encode(const char *s) {
 
 char *http_request_h(const char *method, const char *url,
                      const char *content_type, const char *body,
-                     const char *const *extra, int *status) {
+                     const char *const *extra, int *status,
+                     char *hdr_out, size_t hdr_cap) {
     (void)method; (void)content_type; (void)body; (void)extra;
+    if (hdr_out && hdr_cap) hdr_out[0] = '\0';
     g_last_h_url[0] = '\0';
     if (url) snprintf(g_last_h_url, sizeof(g_last_h_url), "%s", url);
     g_h_gets++;

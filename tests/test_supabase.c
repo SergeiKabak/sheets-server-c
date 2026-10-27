@@ -179,6 +179,15 @@ int main(void) {
     assert(sb_time_restore(gdays, &er) == -1 && er == 1);
     assert(sb_time_restore(NULL, &er) == -1);
 
+    /* ---------- Диагностика: недоступная база -> ok:false, без падения ---------- */
+    {
+        const char *ms[2] = { "Октябрь 2026", "Ноябрь 2026" };
+        char djb[8192];
+        assert(sb_diag(ms, 2, djb, sizeof djb) == -1);
+        assert(strstr(djb, "\"ok\":false") != NULL);
+        assert(strstr(djb, "\"errors\"") != NULL);
+    }
+
     printf("OK   этап 2: разбор месяца и коллег\n");
     printf("OK   этап 3: формат time_entries (паритет с Google), ошибка записи без падения\n");
     printf("OK   этап 4: восстановление time_entries (пусто/битый/недоступная база)\n");

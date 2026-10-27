@@ -208,7 +208,7 @@ static int sb_call(const char *method, const char *path, const char *body) {
     extra[e] = NULL;
 
     int status = 0;
-    char *out = http_request_h(method, url, "application/json", body, extra, &status);
+    char *out = http_request_h(method, url, "application/json", body, extra, &status, NULL, 0);
     free(out);
     return status;
 }
@@ -347,7 +347,7 @@ char *sb_get(const char *path, int *status) {
     snprintf(apikey, sizeof(apikey), "apikey: %s", sb_secret);
     snprintf(auth, sizeof(auth), "Authorization: Bearer %s", sb_secret);
     const char *extra[3] = { apikey, auth, NULL };
-    return http_request_h("GET", url, NULL, NULL, extra, status);
+    return http_request_h("GET", url, NULL, NULL, extra, status, NULL, 0);
 }
 
 #define SB_AGG_MAX 8   /* смен у сотрудника в месяце (Mini App показывает 2) */
@@ -665,4 +665,235 @@ int sb_time_restore(const char *days_json, int *errors) {
         return -1;
     }
     return n;
+}
+
+/* ================= Диагностика: /diag/supabase ================= */
+
+/* Точный счётчик строк PostgREST: GET ...&limit=0 с Prefer: count=exact —
+   тело пустое, число в заголовке Content-Range "a-b/total".
+   Возвращает HTTP-код; *total = -1, если заголовка нет. */
+static int sb_count(const char *path, long *total) {
+    if (total) *total = -1;
+    char url[2048];
+    snprintf(url, sizeof(url), "%s%s", sb_base, path);
+    char apikey[600], auth[600];
+    snprintf(apikey, sizeof(apikey), "apikey: %s", sb_secret);
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", sb_secret);
+    const char *extra[4] = { apikey, auth, "Prefer: count=exact", NULL };
+    char hdr[1024];
+    int status = 0;
+    char *body = http_request_h("GET", url, NULL, NULL, extra, &status, hdr, sizeof(hdr));
+    free(body);
+    /* HTTP/2 отдаёт имена заголовков в нижнем регистре, HTTP/1.1 — обычные.
+       Ищем '/' ТОЛЬКО внутри строки заголовка: в буфере есть и другие
+       заголовки с '/' (set-cookie: Path=/, alt-svc), которые дали бы 0. */
+    const char *cr = strstr(hdr, "Content-Range:");
+    if (!cr) cr = strstr(hdr, "content-range:");
+    if (cr) {
+        const char *eol = strpbrk(cr, "\r\n");
+        size_t len = eol ? (size_t)(eol - cr) : strlen(cr);
+        char line[256];
+        if (len > sizeof(line) - 1) len = sizeof(line) - 1;
+        memcpy(line, cr, len);
+        line[len] = '\0';
+        const char *slash = strrchr(line, '/');
+        if (slash) *total = strtol(slash + 1, NULL, 10);
+    }
+    return status;
+}
+
+/* ISO "2026-10-27T11:48:30.12+00:00" -> unix-время (0 при ошибке) */
+static time_t sb_parse_iso(const char *s) {
+    int Y = 0, M = 0, D = 0, h = 0, mi = 0, sec = 0;
+    if (!s || sscanf(s, "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &mi, &sec) != 6)
+        return 0;
+    struct tm tmv;
+    memset(&tmv, 0, sizeof(tmv));
+    tmv.tm_year = Y - 1900;
+    tmv.tm_mon = M - 1;
+    tmv.tm_mday = D;
+    tmv.tm_hour = h;
+    tmv.tm_min = mi;
+    tmv.tm_sec = sec;
+    return timegm(&tmv);
+}
+
+/* Диагностика для GET /diag/supabase.
+   months/nmonths — месяцы из файлового кэша (для построчных счётчиков).
+   Точные счётчики — через Content-Range (limit=0, тело не читаем).
+   Возвращает 0 (частично или полностью), -1 если даже общий счёт не получен
+   или sync выключен. */
+int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
+    if (!out || cap < 64) return -1;
+    out[0] = '\0';
+    if (!sb_on) {
+        snprintf(out, cap,
+                 "{\"ok\":false,\"error\":\"синхронизация выключена "
+                 "(нет SUPABASE_URL/SUPABASE_SECRET_KEY или SUPABASE_SYNC=0)\"}");
+        return -1;
+    }
+
+    int errs = 0;
+    long total = -1, empty_sh = -1, empty_em = -1, valid = -1;
+    if (sb_count("/schedule?select=day&limit=0", &total) < 200) errs++;
+    if (sb_count("/schedule?select=day&limit=0&shift_time=eq.", &empty_sh) < 200) errs++;
+    if (sb_count("/schedule?select=day&limit=0&employee=eq.", &empty_em) < 200) errs++;
+    if (sb_count("/schedule?select=day&limit=0&shift_time=not.eq.&employee=not.eq.", &valid) < 200)
+        errs++;
+
+    /* построчные счётчики по каждому месяцу */
+    char months_js[4096];
+    size_t mo = 0;
+    int mn = 0;
+    months_js[0] = '\0';
+    for (int i = 0; months && i < nmonths; i++) {
+        if (!months[i] || !*months[i]) continue;
+        char *em = url_encode(months[i]);
+        if (!em) continue;
+        char path[640], mesc[256];
+        long t2 = -1, es = -1, va = -1;
+        int ok1, ok2, ok3;
+        snprintf(path, sizeof(path), "/schedule?select=day&limit=0&month=eq.%s", em);
+        ok1 = sb_count(path, &t2) >= 200;
+        snprintf(path, sizeof(path), "/schedule?select=day&limit=0&month=eq.%s&shift_time=eq.", em);
+        ok2 = sb_count(path, &es) >= 200;
+        snprintf(path, sizeof(path),
+                 "/schedule?select=day&limit=0&month=eq.%s&shift_time=not.eq.&employee=not.eq.", em);
+        ok3 = sb_count(path, &va) >= 200;
+        free(em);
+        if (!ok1 || !ok2 || !ok3) { errs++; continue; }
+        jesc(mesc, sizeof(mesc), months[i]);
+        int w = snprintf(months_js + mo, sizeof(months_js) - mo,
+                         "%s{\"month\":\"%s\",\"total\":%ld,\"empty_shift\":%ld,\"valid\":%ld}",
+                         mn ? "," : "", mesc, t2, es, va);
+        if (w > 0 && (size_t)w < sizeof(months_js) - mo) { mo += (size_t)w; mn++; }
+    }
+
+    /* time_entries: точный счёт + уникальные месяцы (строк немного) */
+    long te_total = -1;
+    if (sb_count("/time_entries?select=day&limit=0", &te_total) < 200) errs++;
+    char te_months_js[512];
+    size_t to = 0;
+    int tn = 0;
+    te_months_js[0] = '\0';
+    {
+        int st = 0;
+        char *body = sb_get("/time_entries?select=month&limit=1000", &st);
+        if (body && st >= 200 && st < 300) {
+            cJSON *arr = cJSON_Parse(body);
+            if (arr && cJSON_IsArray(arr)) {
+                char uniq[64][64];
+                int nun = 0;
+                cJSON *it = NULL;
+                cJSON_ArrayForEach(it, arr) {
+                    cJSON *m = cJSON_GetObjectItemCaseSensitive(it, "month");
+                    if (!cJSON_IsString(m) || !m->valuestring || !m->valuestring[0]) continue;
+                    int dup = 0;
+                    for (int u = 0; u < nun; u++)
+                        if (!strcmp(uniq[u], m->valuestring)) { dup = 1; break; }
+                    if (dup || nun >= 64) continue;
+                    snprintf(uniq[nun], sizeof(uniq[0]), "%s", m->valuestring);
+                    nun++;
+                }
+                for (int u = 0; u < nun; u++) {
+                    char me[192];
+                    jesc(me, sizeof(me), uniq[u]);
+                    int w = snprintf(te_months_js + to, sizeof(te_months_js) - to,
+                                     "%s\"%s\"", tn ? "," : "", me);
+                    if (w > 0 && (size_t)w < sizeof(te_months_js) - to) { to += (size_t)w; tn++; }
+                }
+            }
+            cJSON_Delete(arr);
+        } else {
+            errs++;
+        }
+        free(body);
+    }
+
+    /* журнал: последняя запись + последний restore + возраст пульса */
+    char log_js[2048];
+    int log_ok = 0;
+    {
+        int st = 0;
+        char *body = sb_get("/sync_log?select=kind,row_count,ok,error,at"
+                            "&order=at.desc&limit=10", &st);
+        if (body && st >= 200 && st < 300) {
+            cJSON *arr = cJSON_Parse(body);
+            if (arr && cJSON_IsArray(arr)) {
+                time_t now = time(NULL);
+                cJSON *first = cJSON_GetArrayItem(arr, 0);
+                char entry[512] = "null", restore[512] = "null";
+                if (first) {
+                    cJSON *kind = cJSON_GetObjectItemCaseSensitive(first, "kind");
+                    cJSON *rc   = cJSON_GetObjectItemCaseSensitive(first, "row_count");
+                    cJSON *ok   = cJSON_GetObjectItemCaseSensitive(first, "ok");
+                    cJSON *at   = cJSON_GetObjectItemCaseSensitive(first, "at");
+                    cJSON *errf = cJSON_GetObjectItemCaseSensitive(first, "error");
+                    long age = 0;
+                    if (cJSON_IsString(at) && at->valuestring) {
+                        time_t t = sb_parse_iso(at->valuestring);
+                        if (t > 0) age = (long)(now - t);
+                    }
+                    char k[128] = "", e[512] = "";
+                    jesc(k, sizeof(k), cJSON_IsString(kind) && kind->valuestring ? kind->valuestring : "");
+                    jesc(e, sizeof(e), cJSON_IsString(errf) && errf->valuestring ? errf->valuestring : "");
+                    snprintf(entry, sizeof(entry),
+                             "{\"kind\":\"%s\",\"rows\":%d,\"ok\":%s,\"error\":\"%s\","
+                             "\"at\":\"%s\",\"age_sec\":%ld}",
+                             k, cJSON_IsNumber(rc) ? rc->valueint : 0,
+                             cJSON_IsTrue(ok) ? "true" : "false", e,
+                             cJSON_IsString(at) && at->valuestring ? at->valuestring : "", age);
+                }
+                for (int i = 0; i < cJSON_GetArraySize(arr); i++) {
+                    cJSON *it = cJSON_GetArrayItem(arr, i);
+                    cJSON *kind = cJSON_GetObjectItemCaseSensitive(it, "kind");
+                    if (!cJSON_IsString(kind) || !kind->valuestring ||
+                        strcmp(kind->valuestring, "time_restore") != 0) continue;
+                    cJSON *rc   = cJSON_GetObjectItemCaseSensitive(it, "row_count");
+                    cJSON *ok   = cJSON_GetObjectItemCaseSensitive(it, "ok");
+                    cJSON *at   = cJSON_GetObjectItemCaseSensitive(it, "at");
+                    cJSON *errf = cJSON_GetObjectItemCaseSensitive(it, "error");
+                    long age = 0;
+                    if (cJSON_IsString(at) && at->valuestring) {
+                        time_t t = sb_parse_iso(at->valuestring);
+                        if (t > 0) age = (long)(now - t);
+                    }
+                    char e[512] = "";
+                    jesc(e, sizeof(e), cJSON_IsString(errf) && errf->valuestring ? errf->valuestring : "");
+                    snprintf(restore, sizeof(restore),
+                             "{\"rows\":%d,\"ok\":%s,\"error\":\"%s\","
+                             "\"at\":\"%s\",\"age_sec\":%ld}",
+                             cJSON_IsNumber(rc) ? rc->valueint : 0,
+                             cJSON_IsTrue(ok) ? "true" : "false", e,
+                             cJSON_IsString(at) && at->valuestring ? at->valuestring : "", age);
+                    break;
+                }
+                snprintf(log_js, sizeof(log_js), "\"last\":%s,\"last_restore\":%s",
+                         entry, restore);
+                log_ok = 1;
+            }
+            cJSON_Delete(arr);
+        } else {
+            errs++;
+        }
+        free(body);
+    }
+    if (!log_ok) snprintf(log_js, sizeof(log_js), "\"unavailable\":true");
+
+    char now[40];
+    sb_now_iso(now, sizeof(now));
+    int n = snprintf(out, cap,
+        "{\"ok\":%s,\"at\":\"%s\",\"errors\":%d,"
+        "\"schedule\":{\"total\":%ld,\"valid\":%ld,"
+        "\"empty_shift\":%ld,\"empty_employee\":%ld},"
+        "\"months\":[%s],"
+        "\"time_entries\":{\"total\":%ld,\"months\":[%s]},"
+        "\"sync_log\":{%s}}",
+        (total >= 0) ? "true" : "false", now, errs,
+        total, valid, empty_sh, empty_em,
+        months_js,
+        te_total, te_months_js,
+        log_js);
+    if (n < 0 || (size_t)n >= cap) return -1;
+    return (total >= 0) ? 0 : -1;
 }
