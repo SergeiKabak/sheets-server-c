@@ -279,9 +279,14 @@ async function main() {
   const tbtn = document.getElementById('theme-toggle');
   ok(!!tbtn && !!document.querySelector('meta[name="theme-color"]'),
      'кнопка темы и meta theme-color размечены');
+  const root = document.documentElement;
+  window.localStorage.removeItem('theme');
+  click(tbtn);   /* init() ещё не вызывался */
+  ok(root.getAttribute('data-theme') === 'dark',
+     'переключатель работает сразу после загрузки, без init()');
+  click(tbtn);
   window.localStorage.removeItem('theme');
   APP.app.initTheme();
-  const root = document.documentElement;
   ok(root.getAttribute('data-theme') === 'light',
      'без сохранённого выбора и Telegram — светлая тема: ' + root.getAttribute('data-theme'));
   ok(tbtn.textContent === '🌙' && tbtn.getAttribute('aria-pressed') === 'false',
@@ -289,6 +294,8 @@ async function main() {
   click(tbtn);
   ok(root.getAttribute('data-theme') === 'dark' && window.localStorage.getItem('theme') === 'dark',
      'тап -> тёмная тема, выбор сохранён в localStorage');
+  ok(document.body.getAttribute('data-theme') === 'dark',
+     'атрибут темы продублирован на <body> (совместимость со старыми стилями)');
   ok(tbtn.textContent === '☀️' && tbtn.getAttribute('aria-pressed') === 'true',
      'иконка тёмной темы — солнце');
   ok(document.querySelector('meta[name="theme-color"]').getAttribute('content') === '#14161a',

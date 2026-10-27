@@ -6,9 +6,11 @@
 extern "C" {
 #endif
 
-/* HTML — без кэша (при деплое сразу новый), css/js — с кэшем на 5 минут. */
+/* Всё без кэша: при деплое сразу новые HTML/CSS/JS. Повторный запрос дешёвый —
+ * ETag даёт 304 без тела. Раньше css/js жили 5 минут, и после обновления
+ * браузер мог смешать новый HTML со старыми стилями/скриптами. */
 #define WEB_CACHE_HTML "no-cache"
-#define WEB_CACHE      "public, max-age=300"
+#define WEB_CACHE      "no-cache"
 
 /* Отдаёт файл из web/: Content-Type + ETag + Cache-Control.
  * req — исходный запрос: при совпадении If-None-Match с ETag отвечаем

@@ -30,11 +30,14 @@
             matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
   }
 
-  /* Применяет тему: атрибут на <html> (CSS-переменные), иконку кнопки,
-     цвет системной панели браузера и шапки Telegram. */
+  /* Применяет тему: атрибут на <html> и <body> (CSS-переменные; дублируем,
+     чтобы тема работала и со старыми закэшированными стилями), иконку
+     кнопки, цвет системной панели браузера и шапки Telegram. */
   function applyTheme(theme) {
     var t = (theme === 'dark') ? 'dark' : 'light';
     document.documentElement.setAttribute('data-theme', t);
+    if (document.body) document.body.setAttribute('data-theme', t);
+    document.documentElement.style.colorScheme = t;
 
     var btn = document.getElementById('theme-toggle');
     if (btn) {
@@ -68,14 +71,31 @@
 
   /* Тема на старте: сохранённый выбор важнее темы Telegram; если выбора нет,
      следуем за Telegram и его сменой темы в рантайме. */
-  function initTheme() {
-    applyTheme(savedTheme() || systemTheme());
+  var themeBound = false;
+  var tgWatched = false;
 
+  function bindThemeButton() {
+    if (themeBound) return;
     var btn = document.getElementById('theme-toggle');
-    if (btn) btn.addEventListener('click', toggleTheme);
+    if (!btn) return;
+    btn.addEventListener('click', toggleTheme);
+    themeBound = true;
+  }
 
+  /* SDK Telegram грузится асинхронно: как только он появился — берём его тему
+     (если пользователь не выбирал вручную) и слушаем themeChanged. */
+  function watchTelegramTheme(attempt) {
     var tg = tgApp();
-    if (tg && tg.onEvent) {
+    if (!tg) {
+      if (attempt < 30) {
+        setTimeout(function () { watchTelegramTheme(attempt + 1); }, 100);
+      }
+      return;
+    }
+    if (tgWatched) return;
+    tgWatched = true;
+    if (!savedTheme()) applyTheme(systemTheme());
+    if (tg.onEvent) {
       try {
         tg.onEvent('themeChanged', function () {
           if (!savedTheme()) applyTheme(systemTheme());
@@ -83,6 +103,16 @@
       } catch (e) {}
     }
   }
+
+  function initTheme() {
+    applyTheme(savedTheme() || systemTheme());
+    bindThemeButton();
+    watchTelegramTheme(0);
+  }
+
+  /* Переключатель должен работать сразу и независимо от init(): defer-
+     скрипты выполняются после разбора DOM, поэтому кнопка уже существует. */
+  bindThemeButton();
 
   /* Кнопки месяцев строятся один раз, дальше только переключается .active;
      клик — одним делегированным обработчиком */
