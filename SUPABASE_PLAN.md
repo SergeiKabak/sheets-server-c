@@ -48,7 +48,13 @@ Supabase time_entries ◄─ этап 3 (план): fill/clock пишут сюд
 - [x] **Этап 2.** Чтение `/api/month` и коллег из SQL с фоллбэком на файлы/индекс
        *(A/B-тест: ответы побайтово идентичны файловому пути, 0 фоллбэков)*
 - [x] **Побочно исправлено:** `curl_mini.h` — 5 неверных констант curl (см. ниже)
-- [ ] **Этап 3.** `time_entries`: запись fill/clock + чтение `/api/tracking/days`
+- [x] **Этап 3.** `time_entries`: **write-through** (после успешной записи в Google
+       день дублируется в БД — fill и «Пришла»/«Ушла», включая частичные дни) и
+       **слияние при чтении** `/api/tracking/days`: дни из БД (свежие) перекрывают
+       дни кэша/Google (история до этапа 3); недоступность БД игнорируется —
+       работает прежний источник. Формат дней повторяет `tracking_days_build`
+       (4 поля, числа «%.2f»). Проверки: юнит-тесты формата/слияния/фоллбэка
+       + живой smoke на реальной БД (upsert 201 → чтение → DELETE 204)
 - [ ] **Этап 4.** Ночной экспорт `time_entries` → Google Sheets (страховка free-плана)
 - [ ] **Этап 5.** Чистка файловых кэшей `/tmp` и фоновых чтений Google
 
@@ -91,7 +97,8 @@ Supabase time_entries ◄─ этап 3 (план): fill/clock пишут сюд
 
 - `gcc -O2 -Wall -Wextra` (флаги Docker) и clang: 0 предупреждений;
 - `make test-supabase` — офлайн-тест буфера и разбора данных этапа 2;
-- `tests/test_tracking_fill` — ALL TESTS PASSED;
+- `tests/test_tracking_fill` — ALL TESTS PASSED (включая merge-секцию этапа 3);
+- живой smoke этапа 3: upsert дня → 201, чтение в формате Google, DELETE → 204;
 - `tests/test_miniapp` (jsdom) — 55 проверок PASSED;
 - живой прогон: 4 месяца → **8090 строк** собрано; Google-путь — `cache refreshed: 4/4`;
 - **A/B-эквивалентность (этап 2):** при `SUPABASE_SYNC=0` (файлы) и `=1` (SQL)
