@@ -287,29 +287,6 @@ static int trk_append(char *buf, size_t cap, size_t *off, const char *fmt, ...) 
 /* Возвращает тело ответа; *status — HTTP-код (0 при ошибке). */
 
 
-/* ---------- base64 стандартный (нужен для сверки hash из Telegram initData) ---------- */
-static const char B64STD[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static char *b64std(const unsigned char *in, size_t len) {
-    size_t olen = 4 * ((len + 2) / 3) + 1;
-    char *out = malloc(olen);
-    if (!out) return NULL;
-    size_t i = 0, o = 0;
-    while (i < len) {
-        unsigned int v = (unsigned int)in[i] << 16;
-        if (i + 1 < len) v |= (unsigned int)in[i + 1] << 8;
-        if (i + 2 < len) v |= (unsigned int)in[i + 2];
-        out[o++] = B64STD[(v >> 18) & 0x3F];
-        out[o++] = B64STD[(v >> 12) & 0x3F];
-        out[o++] = (i + 1 < len) ? B64STD[(v >> 6) & 0x3F] : '=';
-        out[o++] = (i + 2 < len) ? B64STD[v & 0x3F] : '=';
-        i += 3;
-    }
-    out[o] = '\0';
-    return out;
-}
-
 static void hexify(const unsigned char *in, size_t len, char *out) {
     static const char *H = "0123456789abcdef";
     for (size_t i = 0; i < len; i++) {
@@ -544,15 +521,6 @@ static char *query_param(const char *query, const char *name) {
     char *dec = trk_url_decode(raw);
     free(raw);
     return dec;
-}
-
-/* Единственный сотрудник. Сопоставление chat_id -> ФИО не требуется:
-   отметки прихода/ухода делает один и тот же человек. */
-static char *employee_name_by_chat(const char *chat_id) {
-    (void)chat_id;
-    const char *sn = getenv("SEARCH_NAME");
-    if (sn && *sn) return strdup(sn);
-    return strdup("Бинкевич Татьяна Эдуардовна");
 }
 
 /* Ставка в час: из HOURLY_RATE (env), иначе 500. */
@@ -840,7 +808,11 @@ static int parse_kv(const char *qs, KvPair *out, int max) {
     return n;
 }
 
-/* Проверяет подпись initData и возвращает telegram user id (NULL при ошибке) */
+/* Проверяет подпись initData и возвращает telegram user id (NULL при ошибке).
+   Функция зарезервирована под включение авторизации mini-app и пока не вызывается
+   (отсюда атрибут unused); вся цепочка parse_kv/hexify/hmac_sha256/json_get_raw_value
+   используется здесь. Включается вызовом из обработчика запросов. */
+__attribute__((unused))
 static char *telegram_verify_initdata(const char *init_data, const char *bot_token) {
     if (!init_data || !*init_data || !bot_token || !*bot_token) return NULL;
 
@@ -875,7 +847,7 @@ static char *telegram_verify_initdata(const char *init_data, const char *bot_tok
     /* сортировка по ключу */
     for (int i = 0; i < n - 1; i++) {
         for (int j = i + 1; j < n; j++) {
-            if (kv[i].key && kv[j].key && strcmp(kv[i].key, kv[j].key) > 0) {
+            if (kv[i].key[0] && kv[j].key[0] && strcmp(kv[i].key, kv[j].key) > 0) {
                 KvPair tmp = kv[i]; kv[i] = kv[j]; kv[j] = tmp;
             }
         }
@@ -923,30 +895,6 @@ static char *telegram_verify_initdata(const char *init_data, const char *bot_tok
 
     for (int i = 0; i < n; i++) free(kv[i].val);
     return uid;
-}
-
-/* Полное имя пользователя из initData (для fallback) */
-static char *telegram_user_fullname(const char *init_data) {
-    KvPair kv[64];
-    int n = parse_kv(init_data, kv, 64);
-    char *result = NULL;
-    for (int i = 0; i < n; i++) {
-        if (kv[i].val && strcmp(kv[i].key, "user") == 0) {
-            char *first = json_get_string(kv[i].val, "first_name");
-            char *last  = json_get_string(kv[i].val, "last_name");
-            if (first && last) {
-                size_t l = strlen(first) + strlen(last) + 2;
-                result = malloc(l);
-                if (result) snprintf(result, l, "%s %s", first, last);
-            } else if (first) {
-                result = strdup(first);
-            }
-            free(first); free(last);
-            break;
-        }
-    }
-    for (int i = 0; i < n; i++) free(kv[i].val);
-    return result;
 }
 
 /* ==================================================================
@@ -1339,17 +1287,6 @@ static int sheets_write_rows(const char *sheet_name, TRows *rows) {
     return rc;
 }
 
-/* Обновляет строку листа (1-based номер строки в Google Sheets) */
-static int write_row(int sheet_row_number, const char *const cells[6]) {
-    char *json = build_values_json(cells);
-    if (!json) return -1;
-    char suffix[64];
-    snprintf(suffix, sizeof(suffix), "!A%d:F%d", sheet_row_number, sheet_row_number);
-    int rc = sheets_update_range(g_current_sheet, suffix, json);
-    free(json);
-    return rc;
-}
-
 /* Добавляет новую строку в конец листа (через append) */
 static int append_row(const char *const cells[6]) {
     char *json = build_values_json(cells);
@@ -1373,17 +1310,6 @@ static void trk_reply(int fd, const char *status, const char *body) {
     write(fd, body, strlen(body));
 }
 
-/* Определяет сотрудника: используется SEARCH_NAME (сотрудник один) */
-static char *resolve_employee(const char *init_data) {
-    (void)init_data;
-    const char *sn = getenv("SEARCH_NAME");
-    if (sn && *sn) {
-        char *name = malloc(strlen(sn) + 1);
-        if (name) strcpy(name, sn);
-        return name;
-    }
-    return strdup("Сотрудник");
-}
 /* POST /api/tracking/clock?action=in|out
    Тело: initData=... (application/x-www-form-urlencoded) */
 /* Выполняет отметку прихода/ухода. Возвращает HTTP-код (200/400/409/500),
@@ -2347,6 +2273,7 @@ static void api_tracking_months(int fd) {
 
 /* Точка входа */
 void tracking_handle(int fd, const char *method, const char *path, const char *body) {
+    (void)method;   /* маршрутизация идёт по path, метод пока не различается */
     tracking_ensure_init();
 
     /* Первый вызов: находим существующую таблицу или создаём новую
@@ -2454,7 +2381,7 @@ static int drive_share(const char *file_id, const char *email, const char *role)
     int status = 0;
     char *resp = http_request_full("POST", url, "application/json", body, token, &status);
     if (!resp) return -1;
-    if (status != 200 && status != 201 || resp_has_error(resp)) {
+    if ((status != 200 && status != 201) || resp_has_error(resp)) {
         trk_log("drive_share status=%d resp=%.300s", status, resp);
         free(resp);
         return -1;
