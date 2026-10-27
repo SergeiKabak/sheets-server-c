@@ -50,7 +50,7 @@ static void serve_version(AppContext *app, int fd) {
     sbuf_append_json_string(&sb, sha ? sha : "неизвестно");
     sbuf_append(&sb, ",\"branch\":");
     sbuf_append_json_string(&sb, branch ? branch : "неизвестно");
-    sbuf_append(&sb, ",\"track_buttons\":\"Пришла/Ушла\"");
+    sbuf_append(&sb, ",\"track_buttons\":\"Пришла/Ушла/Напомнить\"");
     sbuf_append(&sb, ",\"miniapp_url\":");
     sbuf_append_json_string(&sb, has_url ? "задан" : "не задан");
     sbuf_append(&sb, ",\"menu_button\":");
