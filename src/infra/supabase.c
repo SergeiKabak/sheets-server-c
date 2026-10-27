@@ -1,28 +1,32 @@
-/* supabase.c — буфер графика в Supabase через PostgREST (этап 1 плана).
+/* infra/supabase.c — транспорт и буфер строк для Supabase (PostgREST).
  *
- * Цикл (раз в 60 с, из background_updater):
+ * Цикл (раз в 60 с, из app/background):
  *   1. sb_begin_cycle()           — фиксируем updated_at цикла
- *   2. sb_row(...) во время обхода листов Google (см. build_months)
+ *   2. sb_row(...) во время обхода листов Google
  *   3. sb_flush(months, n, &err):
  *        POST   /rest/v1/schedule              — upsert (merge-duplicates)
  *        DELETE /rest/v1/schedule?month=eq.X&updated_at=lt.<cutoff>
  *               — уборка строк, которых больше нет в Google
  *        DELETE /rest/v1/schedule?month=eq.X   — месяцы, пропавшие из Google
- *   4. sb_log(...)                — журнал sync_log (пульс каждые 10 циклов + ошибки)
+ *   4. sb_log(...)                — журнал sync_log (пульс каждые 10 циклов)
  *
  * Дубликаты PK внутри одного батча отсекаются: PostgREST отдаёт ошибку
  * «ON CONFLICT DO UPDATE cannot affect row a second time».
  */
+#include "infra/supabase.h"
+
+#include "vendor/cJSON.h"
+#include "core/json_text.h"
+#include "core/num.h"
+#include "core/strbuf.h"
+#include "core/url_codec.h"
+#include "infra/http_client.h"
+
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
-#include <ctype.h>
 #include <time.h>
-
-#include "cJSON.h"
-#include "http.h"
-#include "supabase.h"
 
 #define SB_MAX_BUCKETS 64        /* месяцев (листов) максимум */
 #define SB_KEY         192       /* ключ строки: day|employee|shift|cabinet */
@@ -71,7 +75,7 @@ void sb_init(void) {
 
 int sb_enabled(void) { return sb_on; }
 
-void sb_now_iso(char *out, size_t cap) {
+static void sb_now_iso(char *out, size_t cap) {
     time_t t = time(NULL);
     struct tm tmv;
     gmtime_r(&t, &tmv);
@@ -80,28 +84,6 @@ void sb_now_iso(char *out, size_t cap) {
 
 void sb_begin_cycle(void) {
     if (sb_on) sb_now_iso(sb_cutoff, sizeof(sb_cutoff));
-}
-
-/* ---------------- JSON ---------------- */
-
-/* Экранирование строки для вставки в JSON (UTF-8 — как есть). */
-static void jesc(char *out, size_t cap, const char *s) {
-    size_t o = 0;
-    if (!s) s = "";
-    if (cap == 0) return;
-    for (; *s && o + 8 < cap; s++) {
-        unsigned char c = (unsigned char)*s;
-        if (c == '"' || c == '\\') { out[o++] = '\\'; out[o++] = (char)c; }
-        else if (c == '\n') { out[o++] = '\\'; out[o++] = 'n'; }
-        else if (c == '\r') { out[o++] = '\\'; out[o++] = 'r'; }
-        else if (c == '\t') { out[o++] = '\\'; out[o++] = 't'; }
-        else if (c < 0x20) {
-            int r = snprintf(out + o, cap - o, "\\u%04x", c);
-            if (r > 0) o += (size_t)r;
-        }
-        else out[o++] = (char)c;
-    }
-    out[o] = '\0';
 }
 
 /* ---------------- буфер строк по месяцам ---------------- */
@@ -142,7 +124,7 @@ void sb_row(const char *month, int day, const char *employee,
 
     /* дедуп PK «день|сотрудник|смена|кабинет» */
     char pk[SB_KEY];
-    snprintf(pk, sizeof(pk), "%d|%s|%s|%s", day, employee, shift ? shift : "", cabinet);
+    snprintf(pk, sizeof(pk), "%d|%s|%s|%s", day, employee, shift, cabinet);
     for (int i = 0; i < b->nkeys; i++)
         if (!strcmp(b->keys[i], pk)) return;
     if (b->nkeys >= b->kcap) {
@@ -155,24 +137,35 @@ void sb_row(const char *month, int day, const char *employee,
     memcpy(b->keys[b->nkeys], pk, SB_KEY);
     b->nkeys++;
 
-    char mm[192], me[768], ms[768], mc[768], cut[64] = "";
-    jesc(mm, sizeof(mm), month);
-    jesc(me, sizeof(me), employee);
-    jesc(ms, sizeof(ms), shift);
-    jesc(mc, sizeof(mc), cabinet);
-    if (sb_cutoff[0]) snprintf(cut, sizeof(cut), ",\"updated_at\":\"%s\"", sb_cutoff);
+    StrBuf sb;
+    sbuf_init(&sb);
+    sbuf_appendf(&sb, "%s{\"month\":", b->count ? "," : "");
+    sbuf_append_json_string(&sb, month);
+    sbuf_appendf(&sb, ",\"day\":%d,\"employee\":", day);
+    sbuf_append_json_string(&sb, employee);
+    sbuf_append(&sb, ",\"shift_time\":");
+    sbuf_append_json_string(&sb, shift);
+    sbuf_append(&sb, ",\"cabinet\":");
+    sbuf_append_json_string(&sb, cabinet);
+    if (sb_cutoff[0]) {
+        sbuf_append(&sb, ",\"updated_at\":");
+        sbuf_append_json_string(&sb, sb_cutoff);
+    }
+    sbuf_append(&sb, "}");
 
-    char row[SB_ROW];
-    snprintf(row, sizeof(row),
-             "%s{\"month\":\"%s\",\"day\":%d,\"employee\":\"%s\","
-             "\"shift_time\":\"%s\",\"cabinet\":\"%s\"%s}",
-             b->count ? "," : "", mm, day, me, ms, mc, cut);
+    char *row = sbuf_take(&sb);
+    if (!row) return;
 
-    if (!grow(&b->rows, &b->cap, b->len + strlen(row) + 1)) { b->nkeys--; return; }
+    if (!grow(&b->rows, &b->cap, b->len + strlen(row) + 1)) {
+        free(row);
+        b->nkeys--;
+        return;
+    }
     memcpy(b->rows + b->len, row, strlen(row));
     b->len += strlen(row);
     b->rows[b->len] = '\0';
     b->count++;
+    free(row);
 }
 
 const char *sb_pending(const char *month, int *count) {
@@ -208,7 +201,8 @@ static int sb_call(const char *method, const char *path, const char *body) {
     extra[e] = NULL;
 
     int status = 0;
-    char *out = http_request_h(method, url, "application/json", body, extra, &status, NULL, 0);
+    char *out = http_request_h(method, url, "application/json", body, extra,
+                               &status, NULL, 0);
     free(out);
     return status;
 }
@@ -301,42 +295,24 @@ int sb_flush(const char *const *months, int nmonths, int *errors) {
 
 void sb_log(const char *kind, const char *month, int rows, int ok, const char *error) {
     if (!sb_on) return;
-    char kb[160], mb[160], eb[640];
-    jesc(kb, sizeof(kb), kind ? kind : "");
-    jesc(mb, sizeof(mb), month ? month : "");
-    jesc(eb, sizeof(eb), error ? error : "");
-    char body[1600];
-    snprintf(body, sizeof(body),
-             "{\"kind\":\"%s\",\"month\":\"%s\",\"row_count\":%d,"
-             "\"ok\":%s,\"error\":\"%s\"}",
-             kb, mb, rows, ok ? "true" : "false", eb);
+    StrBuf sb;
+    sbuf_init(&sb);
+    sbuf_append(&sb, "{\"kind\":");
+    sbuf_append_json_string(&sb, kind ? kind : "");
+    sbuf_append(&sb, ",\"month\":");
+    sbuf_append_json_string(&sb, month ? month : "");
+    sbuf_appendf(&sb, ",\"row_count\":%d,\"ok\":%s,\"error\":", rows, ok ? "true" : "false");
+    sbuf_append_json_string(&sb, error ? error : "");
+    sbuf_append(&sb, "}");
+    char *body = sbuf_take(&sb);
+    if (!body) return;
     int st = sb_call("POST", "/sync_log", body);
+    free(body);
     if (st < 200 || st > 299)
         fprintf(stderr, "[supabase] sync_log -> HTTP %d (таблица создана?)\n", st);
 }
 
-/* ================= Этап 2: чтение из SQL ================= */
-
-/* snprintf-аппенд с контролем переполнения: новый offset или (size_t)-1 */
-static size_t addf(char *out, size_t cap, size_t off, const char *fmt, ...) {
-    if (out == NULL || off >= cap) return (size_t)-1;
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(out + off, cap - off, fmt, ap);
-    va_end(ap);
-    if (n < 0 || (size_t)n >= cap - off) return (size_t)-1;
-    return off + (size_t)n;
-}
-
-/* «7:30-14:40» -> минуты начала смены; не разобрано -> 999999 (в конец) */
-static int shift_start_min(const char *s) {
-    if (!s) return 999999;
-    while (*s == ' ') s++;
-    int h = 0, m = 0;
-    if (sscanf(s, "%d:%d", &h, &m) == 2 && h >= 0 && h < 48 && m >= 0 && m < 60)
-        return h * 60 + m;
-    return 999999;
-}
+/* ================= Чтение из SQL ================= */
 
 char *sb_get(const char *path, int *status) {
     if (status) *status = 0;
@@ -350,251 +326,40 @@ char *sb_get(const char *path, int *status) {
     return http_request_h("GET", url, NULL, NULL, extra, status, NULL, 0);
 }
 
-#define SB_AGG_MAX 8   /* смен у сотрудника в месяце (Mini App показывает 2) */
-
-int sb_month_arrays(const char *rows_json, const char *employee,
-                    int sheet_days, const char *total,
-                    char *s1, size_t s1cap, char *s2, size_t s2cap) {
-    if (!s1 || !s2 || s1cap < 16 || s2cap < 16) return -1;
-    s1[0] = '\0';
-    s2[0] = '\0';
-
-    cJSON *arr = rows_json ? cJSON_Parse(rows_json) : NULL;
-    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return -1; }
-
-    struct Agg {
-        char  shift[128];
-        int   start;                       /* минуты начала — порядок как в листе */
-        int   maxday;
-        int   count;                       /* «Всего смен» */
-        char *cells[32];                   /* cells[день] = кабинет */
-    } aggs[SB_AGG_MAX];
-    int na = 0, maxday = 0;
-
-    int size = cJSON_GetArraySize(arr);
-    for (int i = 0; i < size; i++) {
-        cJSON *it  = cJSON_GetArrayItem(arr, i);
-        cJSON *jd  = it ? cJSON_GetObjectItemCaseSensitive(it, "day") : NULL;
-        cJSON *js  = it ? cJSON_GetObjectItemCaseSensitive(it, "shift_time") : NULL;
-        cJSON *jc  = it ? cJSON_GetObjectItemCaseSensitive(it, "cabinet") : NULL;
-        if (!cJSON_IsNumber(jd) || !cJSON_IsString(jc) || !jc->valuestring) continue;
-        int day = (int)jd->valuedouble;
-        if (day < 1 || day > 31) continue;
-        const char *sh = (cJSON_IsString(js) && js->valuestring) ? js->valuestring : "";
-
-        int k;
-        for (k = 0; k < na; k++)
-            if (!strcmp(aggs[k].shift, sh)) break;
-        if (k == na) {
-            if (na >= SB_AGG_MAX) continue;
-            memset(&aggs[na], 0, sizeof(aggs[na]));
-            snprintf(aggs[na].shift, sizeof(aggs[na].shift), "%s", sh);
-            aggs[na].start = shift_start_min(sh);
-            k = na++;
-        }
-        if (day > aggs[k].maxday) aggs[k].maxday = day;
-        if (day > maxday) maxday = day;
-        aggs[k].count++;
-        free(aggs[k].cells[day]);
-        aggs[k].cells[day] = strdup(jc->valuestring);
-    }
-    cJSON_Delete(arr);
-
-    if (na == 0 || maxday < 1) goto cleanup;   /* данных нет — вызывающий уйдёт в фоллбэк */
-
-    /* смены по времени начала: утренняя = s1, вечерняя = s2 (как в листе) */
-    for (int i = 1; i < na; i++) {
-        struct Agg tmp = aggs[i];
-        int j = i - 1;
-        for (; j >= 0 && aggs[j].start > tmp.start; j--) aggs[j + 1] = aggs[j];
-        aggs[j + 1] = tmp;
-    }
-
-    /* число дней = число столбцов листа (sheet_days), но не меньше данных:
-       счётчик должен стоять после последнего дня, как в листе */
-    int dim = sheet_days > maxday ? sheet_days : maxday;
-    if (dim < 1 || dim > 31) { goto cleanup; }
-
-    char em[768], sh[256], cell[768];
-    jesc(em, sizeof(em), employee ? employee : "");
-    jesc(sh, sizeof(sh), aggs[0].shift);
-
-    /* s1: [имя, смена, day1..dayD, всего смен] — формат строки листа */
-    size_t o = addf(s1, s1cap, 0, "[\"%s\",\"%s\"", em, sh);
-    for (int d = 1; d <= dim && o != (size_t)-1; d++) {
-        const char *v = (d <= aggs[0].maxday && aggs[0].cells[d]) ? aggs[0].cells[d] : "";
-        jesc(cell, sizeof(cell), v);
-        o = addf(s1, s1cap, o, ",\"%s\"", cell);
-    }
-    if (total) {
-        char t[64];
-        jesc(t, sizeof(t), total);
-        o = addf(s1, s1cap, o, ",\"%s\"]", t);      /* значение из листа */
-    } else {
-        o = addf(s1, s1cap, o, ",\"%d\"]", aggs[0].count);   /* запасной подсчёт */
-    }
-
-    /* s2: вторая смена либо пустой массив той же длины (как без второй строки) */
-    size_t o2 = 0;
-    if (na >= 2) {
-        jesc(sh, sizeof(sh), aggs[1].shift);
-        o2 = addf(s2, s2cap, 0, "[\"\",\"%s\"", sh);
-        for (int d = 1; d <= dim && o2 != (size_t)-1; d++) {
-            const char *v = (d <= aggs[1].maxday && aggs[1].cells[d]) ? aggs[1].cells[d] : "";
-            jesc(cell, sizeof(cell), v);
-            o2 = addf(s2, s2cap, o2, ",\"%s\"", cell);
-        }
-        if (total) {
-            o2 = addf(s2, s2cap, o2, ",\"\"]");    /* в листе счётчик только в 1-й строке */
-        } else {
-            o2 = addf(s2, s2cap, o2, ",\"%d\"]", aggs[1].count);
-        }
-    } else {
-        o2 = addf(s2, s2cap, 0, "[");
-        for (int d = 0; d < dim + 3 && o2 != (size_t)-1; d++)
-            o2 = addf(s2, s2cap, o2, "%s\"\"", d ? "," : "");
-        o2 = addf(s2, s2cap, o2, "]");
-    }
-
-    if (o == (size_t)-1 || o2 == (size_t)-1) {
-        s1[0] = '\0';
-        s2[0] = '\0';
-    }
-
-cleanup:
-    for (int k = 0; k < na; k++)
-        for (int d = 0; d < 32; d++) free(aggs[k].cells[d]);
-    if (!s1[0]) return -1;   /* ничего не построено (нет данных либо переполнение) */
-    return 0;
-}
-
-int sb_colleagues_json(const char *rows_json, const char *self,
-                       const char *shift, SBShiftFilter filter,
-                       char *out, size_t outcap) {
-    if (!out || outcap < 4) return -1;
-    out[0] = '\0';
-
-    cJSON *arr = rows_json ? cJSON_Parse(rows_json) : NULL;
-    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return -1; }
-
-    char enames[64][256];
-    char eshifts[64][128];
-    int emitted = 0, nout = 0;
-    size_t o = addf(out, outcap, 0, "[");
-
-    int size = cJSON_GetArraySize(arr);
-    for (int i = 0; i < size && emitted < 64; i++) {
-        cJSON *it = cJSON_GetArrayItem(arr, i);
-        cJSON *je = it ? cJSON_GetObjectItemCaseSensitive(it, "employee") : NULL;
-        cJSON *js = it ? cJSON_GetObjectItemCaseSensitive(it, "shift_time") : NULL;
-        if (!cJSON_IsString(je) || !je->valuestring || !je->valuestring[0]) continue;
-        const char *name = je->valuestring;
-        const char *s = (cJSON_IsString(js) && js->valuestring) ? js->valuestring : "";
-
-        if (self && *self && !strcmp(name, self)) continue;          /* сам сотрудник */
-        if (shift && *shift && filter && !filter(s, shift)) continue; /* пересечение смен */
-
-        int dup = 0;
-        for (int q = 0; q < emitted; q++)
-            if (!strcmp(enames[q], name) && !strcmp(eshifts[q], s)) { dup = 1; break; }
-        if (dup) continue;
-        snprintf(enames[emitted], sizeof(enames[0]), "%s", name);
-        snprintf(eshifts[emitted], sizeof(eshifts[0]), "%s", s);
-        emitted++;
-
-        char en[768], es[512];
-        jesc(en, sizeof(en), name);
-        jesc(es, sizeof(es), s);
-        o = addf(out, outcap, o, "%s{\"name\":\"%s\",\"shift\":\"%s\"}",
-                 nout ? "," : "", en, es);
-        if (o == (size_t)-1) break;
-        nout++;
-    }
-    cJSON_Delete(arr);
-
-    if (o == (size_t)-1) { out[0] = '\0'; return -1; }
-    o = addf(out, outcap, o, "]");
-    if (o == (size_t)-1) { out[0] = '\0'; return -1; }
-    return (int)o;
-}
-
-/* ================= Этап 3: учёт времени (time_entries) ================= */
-
-/* «7.17» — допустимо как число; пусто/с запятой/мусор — нет */
-static int is_num_str(const char *s) {
-    if (!s || !*s) return 0;
-    for (const char *p = s; *p; p++)
-        if (!isdigit((unsigned char)*p) && *p != '.' && *p != '-') return 0;
-    return 1;
-}
+/* ================= Учёт времени (time_entries) ================= */
 
 int sb_time_upsert(const char *month_tab, int day,
                    const char *in_t, const char *out_t,
                    const char *hours, const char *sum) {
     if (!sb_on || !month_tab || !*month_tab || day < 1 || day > 31) return 0;
-    char mt[64], mi[32], mo[32];
-    jesc(mt, sizeof(mt), month_tab);
-    jesc(mi, sizeof(mi), in_t ? in_t : "");
-    jesc(mo, sizeof(mo), out_t ? out_t : "");
+
+    StrBuf sb;
+    sbuf_init(&sb);
+    sbuf_append(&sb, "{\"month\":");
+    sbuf_append_json_string(&sb, month_tab);
+    sbuf_appendf(&sb, ",\"day\":%d,\"t_in\":", day);
+    sbuf_append_json_string(&sb, in_t ? in_t : "");
+    sbuf_append(&sb, ",\"t_out\":");
+    sbuf_append_json_string(&sb, out_t ? out_t : "");
+    sbuf_append(&sb, ",\"hours\":");
     /* колонки numeric: не-число -> null (не уронит каст на PostgREST) */
-    char hbuf[64] = "null", sbuf[64] = "null";
-    if (is_num_str(hours)) snprintf(hbuf, sizeof(hbuf), "%s", hours);
-    if (is_num_str(sum))   snprintf(sbuf, sizeof(sbuf), "%s", sum);
-    char body[1024];
-    snprintf(body, sizeof(body),
-             "{\"month\":\"%s\",\"day\":%d,\"t_in\":\"%s\",\"t_out\":\"%s\","
-             "\"hours\":%s,\"amount\":%s}",
-             mt, day, mi, mo, hbuf, sbuf);
+    sbuf_append(&sb, num_is_valid(hours) ? "" : "null");
+    if (num_is_valid(hours)) sbuf_append(&sb, hours);
+    sbuf_append(&sb, ",\"amount\":");
+    sbuf_append(&sb, num_is_valid(sum) ? "" : "null");
+    if (num_is_valid(sum)) sbuf_append(&sb, sum);
+    sbuf_append(&sb, "}");
+    char *body = sbuf_take(&sb);
+    if (!body) return 0;
+
     int st = sb_call("POST", "/time_entries", body);
+    free(body);
     if (st < 200 || st > 299)
         fprintf(stderr, "[supabase] time upsert %s day=%d -> HTTP %d\n",
                 month_tab, day, st);
     return st;
 }
 
-int sb_time_days_json(const char *rows_json, char *out, size_t outcap) {
-    if (!out || outcap < 8) return -1;
-    out[0] = '\0';
-    cJSON *arr = rows_json ? cJSON_Parse(rows_json) : NULL;
-    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return -1; }
-
-    size_t o = addf(out, outcap, 0, "{");
-    int size = cJSON_GetArraySize(arr), n = 0;
-    for (int i = 0; i < size; i++) {
-        cJSON *it = cJSON_GetArrayItem(arr, i);
-        cJSON *jd = it ? cJSON_GetObjectItemCaseSensitive(it, "day") : NULL;
-        cJSON *ji = it ? cJSON_GetObjectItemCaseSensitive(it, "t_in") : NULL;
-        cJSON *jo = it ? cJSON_GetObjectItemCaseSensitive(it, "t_out") : NULL;
-        cJSON *jh = it ? cJSON_GetObjectItemCaseSensitive(it, "hours") : NULL;
-        cJSON *ja = it ? cJSON_GetObjectItemCaseSensitive(it, "amount") : NULL;
-        if (!cJSON_IsNumber(jd)) continue;
-        int day = (int)jd->valuedouble;
-        if (day < 1 || day > 31) continue;
-
-        char in_j[64], out_j[64], h_j[64], s_j[64];
-        jesc(in_j, sizeof(in_j), cJSON_IsString(ji) && ji->valuestring ? ji->valuestring : "");
-        jesc(out_j, sizeof(out_j), cJSON_IsString(jo) && jo->valuestring ? jo->valuestring : "");
-        /* формат tracking_days_build: часы/сумма — строки, у пустых — "" */
-        char hbuf[32] = "", sbuf[32] = "";
-        if (cJSON_IsNumber(jh)) snprintf(hbuf, sizeof(hbuf), "%.2f", jh->valuedouble);
-        if (cJSON_IsNumber(ja)) snprintf(sbuf, sizeof(sbuf), "%.2f", ja->valuedouble);
-        jesc(h_j, sizeof(h_j), hbuf);
-        jesc(s_j, sizeof(s_j), sbuf);
-        o = addf(out, outcap, o,
-                 "%s\"%d\":{\"in\":\"%s\",\"out\":\"%s\",\"hours\":\"%s\",\"sum\":\"%s\"}",
-                 n ? "," : "", day, in_j, out_j, h_j, s_j);
-        if (o == (size_t)-1) break;
-        n++;
-    }
-    cJSON_Delete(arr);
-
-    if (o == (size_t)-1) { out[0] = '\0'; return -1; }
-    o = addf(out, outcap, o, "}");
-    if (o == (size_t)-1) { out[0] = '\0'; return -1; }
-    return 0;
-}
-
-/* Удаление дня из time_entries (см. supabase.h) */
 int sb_time_day_delete(const char *month_tab, int day) {
     if (!sb_on || !month_tab || !*month_tab || day < 1 || day > 31) return 0;
     char *em = url_encode(month_tab);
@@ -605,7 +370,6 @@ int sb_time_day_delete(const char *month_tab, int day) {
     return sb_call("DELETE", path, NULL);
 }
 
-/* Чтение одного дня (см. supabase.h) */
 int sb_time_day_read(const char *month_tab, int day,
                      char *in, size_t incap,
                      char *out, size_t outcap,
@@ -704,11 +468,6 @@ static time_t sb_parse_iso(const char *s) {
     return timegm(&tmv);
 }
 
-/* Диагностика для GET /diag/supabase.
-   months/nmonths — месяцы из файлового кэша (для построчных счётчиков).
-   Точные счётчики — через Content-Range (limit=0, тело не читаем).
-   Возвращает 0 (частично или полностью), -1 если даже общий счёт не получен
-   или sync выключен. */
 int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
     if (!out || cap < 64) return -1;
     out[0] = '\0';
@@ -728,15 +487,15 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
         errs++;
 
     /* построчные счётчики по каждому месяцу */
-    char months_js[4096];
-    size_t mo = 0;
+    StrBuf months_js;
+    sbuf_init(&months_js);
+    sbuf_append(&months_js, "[");
     int mn = 0;
-    months_js[0] = '\0';
     for (int i = 0; months && i < nmonths; i++) {
         if (!months[i] || !*months[i]) continue;
         char *em = url_encode(months[i]);
         if (!em) continue;
-        char path[640], mesc[256];
+        char path[640];
         long t2 = -1, es = -1, va = -1;
         int ok1, ok2, ok3;
         snprintf(path, sizeof(path), "/schedule?select=day&limit=0&month=eq.%s", em);
@@ -748,20 +507,21 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
         ok3 = sb_count(path, &va) >= 200;
         free(em);
         if (!ok1 || !ok2 || !ok3) { errs++; continue; }
-        jesc(mesc, sizeof(mesc), months[i]);
-        int w = snprintf(months_js + mo, sizeof(months_js) - mo,
-                         "%s{\"month\":\"%s\",\"total\":%ld,\"empty_shift\":%ld,\"valid\":%ld}",
-                         mn ? "," : "", mesc, t2, es, va);
-        if (w > 0 && (size_t)w < sizeof(months_js) - mo) { mo += (size_t)w; mn++; }
+        sbuf_appendf(&months_js, "%s{\"month\":", mn ? "," : "");
+        sbuf_append_json_string(&months_js, months[i]);
+        sbuf_appendf(&months_js, ",\"total\":%ld,\"empty_shift\":%ld,\"valid\":%ld}",
+                   t2, es, va);
+        mn++;
     }
+    sbuf_append(&months_js, "]");
+    char *months_buf = sbuf_take(&months_js);
 
     /* time_entries: точный счёт + уникальные месяцы (строк немного) */
     long te_total = -1;
     if (sb_count("/time_entries?select=day&limit=0", &te_total) < 200) errs++;
-    char te_months_js[512];
-    size_t to = 0;
-    int tn = 0;
-    te_months_js[0] = '\0';
+    StrBuf te_months;
+    sbuf_init(&te_months);
+    sbuf_append(&te_months, "[");
     {
         int st = 0;
         char *body = sb_get("/time_entries?select=month&limit=1000", &st);
@@ -782,11 +542,8 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
                     nun++;
                 }
                 for (int u = 0; u < nun; u++) {
-                    char me[192];
-                    jesc(me, sizeof(me), uniq[u]);
-                    int w = snprintf(te_months_js + to, sizeof(te_months_js) - to,
-                                     "%s\"%s\"", tn ? "," : "", me);
-                    if (w > 0 && (size_t)w < sizeof(te_months_js) - to) { to += (size_t)w; tn++; }
+                    sbuf_append(&te_months, u ? "," : "");
+                    sbuf_append_json_string(&te_months, uniq[u]);
                 }
             }
             cJSON_Delete(arr);
@@ -795,9 +552,12 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
         }
         free(body);
     }
+    sbuf_append(&te_months, "]");
+    char *te_months_buf = sbuf_take(&te_months);
 
     /* журнал: последняя запись + последний restore + возраст пульса */
-    char log_js[2048];
+    StrBuf log_js;
+    sbuf_init(&log_js);
     int log_ok = 0;
     {
         int st = 0;
@@ -808,7 +568,6 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
             if (arr && cJSON_IsArray(arr)) {
                 time_t now = time(NULL);
                 cJSON *first = cJSON_GetArrayItem(arr, 0);
-                char entry[512] = "null", restore[512] = "null";
                 if (first) {
                     cJSON *kind = cJSON_GetObjectItemCaseSensitive(first, "kind");
                     cJSON *rc   = cJSON_GetObjectItemCaseSensitive(first, "row_count");
@@ -820,16 +579,21 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
                         time_t t = sb_parse_iso(at->valuestring);
                         if (t > 0) age = (long)(now - t);
                     }
-                    char k[128] = "", e[512] = "";
-                    jesc(k, sizeof(k), cJSON_IsString(kind) && kind->valuestring ? kind->valuestring : "");
-                    jesc(e, sizeof(e), cJSON_IsString(errf) && errf->valuestring ? errf->valuestring : "");
-                    snprintf(entry, sizeof(entry),
-                             "{\"kind\":\"%s\",\"rows\":%d,\"ok\":%s,\"error\":\"%s\","
-                             "\"at\":\"%s\",\"age_sec\":%ld}",
-                             k, cJSON_IsNumber(rc) ? rc->valueint : 0,
-                             cJSON_IsTrue(ok) ? "true" : "false", e,
-                             cJSON_IsString(at) && at->valuestring ? at->valuestring : "", age);
+                    sbuf_append(&log_js, "\"last\":{\"kind\":");
+                    sbuf_append_json_string(&log_js,
+                        (cJSON_IsString(kind) && kind->valuestring) ? kind->valuestring : "");
+                    sbuf_appendf(&log_js, ",\"rows\":%d,\"ok\":%s,\"error\":",
+                               cJSON_IsNumber(rc) ? rc->valueint : 0,
+                               cJSON_IsTrue(ok) ? "true" : "false");
+                    sbuf_append_json_string(&log_js,
+                        (cJSON_IsString(errf) && errf->valuestring) ? errf->valuestring : "");
+                    sbuf_append(&log_js, ",\"at\":");
+                    sbuf_append_json_string(&log_js,
+                        (cJSON_IsString(at) && at->valuestring) ? at->valuestring : "");
+                    sbuf_appendf(&log_js, ",\"age_sec\":%ld}", age);
                 }
+                sbuf_append(&log_js, ",\"last_restore\":");
+                int found_restore = 0;
                 for (int i = 0; i < cJSON_GetArraySize(arr); i++) {
                     cJSON *it = cJSON_GetArrayItem(arr, i);
                     cJSON *kind = cJSON_GetObjectItemCaseSensitive(it, "kind");
@@ -844,18 +608,19 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
                         time_t t = sb_parse_iso(at->valuestring);
                         if (t > 0) age = (long)(now - t);
                     }
-                    char e[512] = "";
-                    jesc(e, sizeof(e), cJSON_IsString(errf) && errf->valuestring ? errf->valuestring : "");
-                    snprintf(restore, sizeof(restore),
-                             "{\"rows\":%d,\"ok\":%s,\"error\":\"%s\","
-                             "\"at\":\"%s\",\"age_sec\":%ld}",
-                             cJSON_IsNumber(rc) ? rc->valueint : 0,
-                             cJSON_IsTrue(ok) ? "true" : "false", e,
-                             cJSON_IsString(at) && at->valuestring ? at->valuestring : "", age);
+                    sbuf_appendf(&log_js, "{\"rows\":%d,\"ok\":%s,\"error\":",
+                              cJSON_IsNumber(rc) ? rc->valueint : 0,
+                              cJSON_IsTrue(ok) ? "true" : "false");
+                    sbuf_append_json_string(&log_js,
+                        (cJSON_IsString(errf) && errf->valuestring) ? errf->valuestring : "");
+                    sbuf_append(&log_js, ",\"at\":");
+                    sbuf_append_json_string(&log_js,
+                        (cJSON_IsString(at) && at->valuestring) ? at->valuestring : "");
+                    sbuf_appendf(&log_js, ",\"age_sec\":%ld}", age);
+                    found_restore = 1;
                     break;
                 }
-                snprintf(log_js, sizeof(log_js), "\"last\":%s,\"last_restore\":%s",
-                         entry, restore);
+                if (!found_restore) sbuf_append(&log_js, "null");
                 log_ok = 1;
             }
             cJSON_Delete(arr);
@@ -864,7 +629,12 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
         }
         free(body);
     }
-    if (!log_ok) snprintf(log_js, sizeof(log_js), "\"unavailable\":true");
+    if (!log_ok) {
+        sbuf_free(&log_js);
+        sbuf_init(&log_js);
+        sbuf_append(&log_js, "\"unavailable\":true");
+    }
+    char *log_buf = sbuf_take(&log_js);
 
     char now[40];
     sb_now_iso(now, sizeof(now));
@@ -877,9 +647,12 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
         "\"sync_log\":{%s}}",
         (total >= 0) ? "true" : "false", now, errs,
         total, valid, empty_sh, empty_em,
-        months_js,
-        te_total, te_months_js,
-        log_js);
+        months_buf ? months_buf : "",
+        te_total, te_months_buf ? te_months_buf : "",
+        log_buf ? log_buf : "");
+    free(months_buf);
+    free(te_months_buf);
+    free(log_buf);
     if (n < 0 || (size_t)n >= cap) return -1;
     return (total >= 0) ? 0 : -1;
 }

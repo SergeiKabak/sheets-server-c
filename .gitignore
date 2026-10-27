@@ -3,6 +3,7 @@
 
 # Compiled binaries
 sheet
+server_app
 *.service
 server_mac
 test_popen
@@ -10,6 +11,9 @@ test_popen
 # Build artifacts
 *.o
 *.out
+
+# Dependencies (Mini App tests)
+node_modules/
 
 # OS files
 .DS_Store

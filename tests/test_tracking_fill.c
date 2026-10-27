@@ -1,41 +1,29 @@
-/* Локальный тест нового заполнения Time tracking.
-   Собирается вместе с tracking.c и подменяет http_request_full,
-   поэтому Google API не нужен. */
+/* Локальный тест заполнения Time tracking.
+ *
+ * Собирается вместе с модулями app/ и infra/ и подменяет HTTP-слой
+ * (http_request_full / http_request_h), поэтому Google API не нужен.
+ *
+ * Проверяются сценарии app/tracking_service: чтение отметок, заполнение
+ * дня, правка, удаление и выгрузка БД -> Google. */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <utime.h>
 
-#include "tracking.c"
+#include "app/tracking_service.h"
+#include "core/url_codec.h"
+#include "infra/supabase.h"
 
-/* ---- заглушки http.c для supabase.c (http.c в эту сборку не входит) ---- */
+/* ---- заглушки http-слоя для supabase.c и google_*.c ---- */
 static int g_h_status = 200;        /* общий/upsert (POST time_entries) */
 static char *g_h_body = NULL;       /* тело для общего запроса */
 static char *g_h_day_body = NULL;   /* ответ чтения одного дня (sb_time_day_read) */
 static char *g_h_list_body = NULL;  /* ответ списка дней месяца (push) */
 static int g_h_gets = 0;
 static char g_last_h_url[1024];
-
-char *url_encode(const char *s) {
-    if (!s) return NULL;
-    size_t len = strlen(s);
-    char *out = malloc(len * 3 + 1);
-    if (!out) return NULL;
-    size_t o = 0;
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-            out[o++] = c;
-        } else {
-            o += snprintf(out + o, 4, "%%%02X", c);
-        }
-    }
-    out[o] = '\0';
-    return out;
-}
 
 char *http_request_h(const char *method, const char *url,
                      const char *content_type, const char *body,
@@ -63,16 +51,14 @@ static char g_created[8][32];
 static int g_created_count = 0;
 
 static int created_has(const char *tab) {
-    for (int i = 0; i < g_created_count; i++) {
+    for (int i = 0; i < g_created_count; i++)
         if (strcmp(g_created[i], tab) == 0) return 1;
-    }
     return 0;
 }
 
 static int created_in_url(const char *url) {
-    for (int i = 0; i < g_created_count; i++) {
+    for (int i = 0; i < g_created_count; i++)
         if (strstr(url, g_created[i])) return 1;
-    }
     return 0;
 }
 
@@ -88,8 +74,8 @@ static const char *MONTH_JSON =
     "]}";
 
 char *http_request_full(const char *method, const char *url,
-                        const char *content_type, const char *body,
-                        const char *bearer, int *status) {
+                         const char *content_type, const char *body,
+                         const char *bearer, int *status) {
     (void)content_type;
     (void)bearer;
     if (status) *status = 200;
@@ -168,6 +154,7 @@ static void check(int cond, const char *what) {
         fails++;
     }
 }
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s /path/to/rsa_key.pem\n", argv[0]);
@@ -205,6 +192,12 @@ int main(int argc, char **argv) {
     remove("/tmp/test_trk_sa_token");
     setenv("GOOGLE_DRIVE_BASE", "http://fake", 1);
 
+    /* Контекст приложения: конфигурация + сервис учёта времени. */
+    AppConfig cfg;
+    config_load(&cfg);
+    TrackingService svc;
+    tracking_service_init(&svc, &cfg);
+
     char out[16384];
     int code;
 
@@ -215,7 +208,7 @@ int main(int argc, char **argv) {
     remove("/tmp/trk_days_11.2026.json");
 
     int gets0 = g_values_gets;
-    code = tracking_days_json("Октябрь 2026", out, sizeof(out));
+    code = tracking_days_json(&svc, "Октябрь 2026", out, sizeof(out));
     printf("days: %d %s\n", code, out);
     check(code == 200, "GET days: код 200");
     check(g_values_gets == gets0 + 1, "GET days: первый вызов читает Google");
@@ -225,32 +218,32 @@ int main(int argc, char **argv) {
     check(!strstr(out, "\"5\":{\"in\":\"09:00\""), "GET days: чужой сотрудник не попал");
 
     int gets1 = g_values_gets;
-    code = tracking_days_json("10.2026", out, sizeof(out));
+    code = tracking_days_json(&svc, "10.2026", out, sizeof(out));
     check(code == 200 && g_values_gets == gets1, "GET days: повторный вызов из кэша");
 
     struct utimbuf ut;
     ut.actime = ut.modtime = time(NULL) - 1000;
     utime("/tmp/trk_days_10.2026.json", &ut);
     int gets_stale = g_values_gets;
-    code = tracking_days_json("10.2026", out, sizeof(out));
+    code = tracking_days_json(&svc, "10.2026", out, sizeof(out));
     check(code == 200 && g_values_gets == gets_stale + 1,
           "GET days: устаревший кэш перечитывается из Google");
 
     char cached[16384];
-    check(tracking_days_cached_json("Октябрь 2026", cached, sizeof(cached)) == 0,
+    check(tracking_days_cached_json(&svc, "Октябрь 2026", cached, sizeof(cached)) == 0,
           "cache: свежий кэш доступен напрямую");
-    check(tracking_days_cached_json("Ноябрь 2026", cached, sizeof(cached)) == -1,
+    check(tracking_days_cached_json(&svc, "Ноябрь 2026", cached, sizeof(cached)) == -1,
           "cache: для месяца без файла кэша нет");
     check(access("/tmp/trk_days_10.2026.json", R_OK) == 0, "cache: файл месяца создан");
 
-    const char *labels[] = {"Октябрь 2026", "Сентябрь 2026"};
-    int nref = tracking_cache_refresh(labels, 2);
+    const char *labels[] = { "Октябрь 2026", "Сентябрь 2026" };
+    int nref = tracking_cache_refresh(&svc, labels, 2);
     check(nref == 2, "cache: фоновое обновление двух месяцев");
     check(access("/tmp/trk_days_09.2026.json", R_OK) == 0,
           "cache: файл прошлого месяца создан");
 
     int before = g_put_count;
-    code = tracking_fill_day("Октябрь 2026", 7, "7:30", "14:40", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Октябрь 2026", 7, "7:30", "14:40", out, sizeof(out));
     printf("fill 7: %d %s\n", code, out);
     check(code == 200, "fill: новый день записан");
     check(access("/tmp/trk_days_10.2026.json", R_OK) != 0,
@@ -264,32 +257,32 @@ int main(int argc, char **argv) {
           "fill: существующие строки сохранены");
 
     before = g_put_count;
-    code = tracking_fill_day("10.2026", 5, "09:00", "18:00", out, sizeof(out));
+    code = tracking_fill_day(&svc, "10.2026", 5, "09:00", "18:00", out, sizeof(out));
     printf("fill 5 repeat: %d %s\n", code, out);
     check(code == 200 && strstr(out, "\"in\":\"09:00\"") != NULL,
           "fill: повторный fill — правка (перезапись), не 409");
     check(g_put_count > before, "fill: правка записана");
 
-    code = tracking_fill_day("Октябрь 2026", 6, "08:00", "15:00", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Октябрь 2026", 6, "08:00", "15:00", out, sizeof(out));
     printf("fill 6: %d %s\n", code, out);
     check(code == 200, "fill: незавершённый день дополнен");
     check(g_last_put && strstr(g_last_put, "\"06.10.2026\",\"08:00\",\"15:00\",\"7.00\""),
           "fill: уход и часы проставлены");
 
-    code = tracking_fill_day("Январь 2030", 1, "07:30", "14:40", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Январь 2030", 1, "07:30", "14:40", out, sizeof(out));
     printf("fill future: %d %s\n", code, out);
     check(code == 400 && strstr(out, "будущую"), "fill: будущая дата отклонена");
 
-    code = tracking_fill_day("Октябрь 2026", 7, "25:00", "14:40", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Октябрь 2026", 7, "25:00", "14:40", out, sizeof(out));
     printf("fill bad time: %d %s\n", code, out);
     check(code == 400 && strstr(out, "неверное время"), "fill: неверное время отклонено");
 
-    code = tracking_fill_day("Ноябрь 2026", 31, "07:30", "14:40", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Ноябрь 2026", 31, "07:30", "14:40", out, sizeof(out));
     printf("fill bad day: %d %s\n", code, out);
     check(code == 400 && strstr(out, "неверный день"), "fill: несуществующий день отклонён");
 
     before = g_put_count;
-    code = tracking_fill_day("Сентябрь 2026", 10, "07:30", "14:40", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Сентябрь 2026", 10, "07:30", "14:40", out, sizeof(out));
     printf("fill sep: %d %s\n", code, out);
     check(code == 200, "fill: прошлый месяц записан");
     check(created_has("09.2026"), "fill: вкладка прошлого месяца создана");
@@ -304,7 +297,7 @@ int main(int argc, char **argv) {
        Дни пустые (в графике плюсы), а fill создаёт вкладку "10.2025". */
     remove("/tmp/trk_days_10.2025.json");
     int gets_missing = g_values_gets;
-    code = tracking_days_json("Октябрь 2025", out, sizeof(out));
+    code = tracking_days_json(&svc, "Октябрь 2025", out, sizeof(out));
     printf("days missing: %d %s\n", code, out);
     check(code == 200 && strstr(out, "\"days\":{}") != NULL,
           "days: нет вкладки месяца -> пустые дни");
@@ -314,9 +307,9 @@ int main(int argc, char **argv) {
           "cache: пустой месяц закэширован");
 
     before = g_put_count;
-    code = tracking_fill_day("Октябрь 2025", 10, "07:30", "14:40", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Октябрь 2025", 10, "07:30", "14:40", out, sizeof(out));
     printf("fill missing month: %d %s\n", code, out);
-    check(code == 200 && strstr(out, "\"month\":\"10.2025\""),
+    check(code == 200 && strstr(out, "\"month\":\"10.2025\"") != NULL,
           "fill: создан месяц 10.2025");
     check(created_has("10.2025"), "fill: вкладка названа 10.2025");
     check(g_put_count == before + 1, "fill: запись в созданную вкладку");
@@ -325,10 +318,10 @@ int main(int argc, char **argv) {
     check(g_last_put && strstr(g_last_put, "\"10.10.2025\",\"07:30\",\"14:40\""),
           "fill: строка 10.10 записана");
     check(access("/tmp/trk_days_10.2025.json", R_OK) != 0,
-          "fill: пустой кэш 10.2025 сброшен");
+          "cache: пустой кэш 10.2025 сброшен");
 
     /* Диагностическое создание вкладки без записи дня. */
-    code = tracking_ensure_month("Октябрь 2024", out, sizeof(out));
+    code = tracking_ensure_month(&svc, "Октябрь 2024", out, sizeof(out));
     printf("ensure month: %d %s\n", code, out);
     check(code == 200 && strstr(out, "\"month\":\"10.2024\"") != NULL,
           "ensure: вкладка месяца создана");
@@ -339,31 +332,26 @@ int main(int argc, char **argv) {
     /* Google может вернуть тело ошибки "Unable to parse range" с HTTP 200.
        Это не должно приниматься за существующую вкладку. */
     remove("/tmp/trk_days_11.2025.json");
-    code = tracking_days_json("Ноябрь 2025", out, sizeof(out));
+    code = tracking_days_json(&svc, "Ноябрь 2025", out, sizeof(out));
     check(code == 200 && strstr(out, "\"days\":{}") != NULL,
           "google 200-error: отсутствующая вкладка считается пустой");
-    code = tracking_fill_day("Ноябрь 2025", 20, "07:30", "14:40", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Ноябрь 2025", 20, "07:30", "14:40", out, sizeof(out));
     printf("fill 200-error month: %d %s\n", code, out);
     check(code == 200 && strstr(out, "\"month\":\"11.2025\"") != NULL,
           "google 200-error: вкладка создаётся и запись проходит");
     check(created_has("11.2025"), "google 200-error: создана 11.2025");
 
     /* Ошибка в теле ответа при записи не должна выглядеть как успех. */
-    code = tracking_fill_day("Декабрь 2025", 20, "07:30", "14:40", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Декабрь 2025", 20, "07:30", "14:40", out, sizeof(out));
     printf("fill write-error month: %d %s\n", code, out);
     check(code == 500 && !strstr(out, "\"ok\":true"),
           "google 200-error: ошибка записи не выдаётся за успех");
 
-    char *p1 = query_param("/api/tracking/fill?month=10.2026&day=5&in=07:30&out=14:40", "in");
-    char *p2 = query_param("/api/tracking/fill?month=10.2026&day=5&min=bad", "in");
+    char *p1 = url_query_param("/api/tracking/fill?month=10.2026&day=5&in=07:30&out=14:40", "in");
+    char *p2 = url_query_param("/api/tracking/fill?month=10.2026&day=5&min=bad", "in");
     check(p1 && strcmp(p1, "07:30") == 0, "query: параметр in найден");
     check(!p2, "query: in не находится внутри min");
     free(p1); free(p2);
-
-/* Слияние time_entries с чтением days убрано (вариант 1 оптимизации):
-   БД ⊆ Google (write-through только после успеха Google), merge не добавлял
-   данных, но стоил 0.6-0.9 с на каждый вызов. Моки http_request_h/url_encode
-   остаются — их требует supabase.c при линковке. */
 
     /* ==== Переход на БД-first: запись / 409 / фоллбэк / выгрузка ==== */
     remove("/tmp/gdirty_10.2026");
@@ -377,7 +365,7 @@ int main(int argc, char **argv) {
     g_h_day_body = strdup("[]");
     g_h_status = 200;
     int put_before = g_put_count;
-    code = tracking_fill_day("Октябрь 2026", 7, "09:00", "17:00", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Октябрь 2026", 7, "09:00", "17:00", out, sizeof(out));
     printf("db fill: %d %s\n", code, out);
     check(code == 200 && strstr(out, "\"ok\":true") != NULL, "db: fill записан в БД");
     check(g_put_count == put_before, "db: в Google не писали (запись в БД)");
@@ -385,7 +373,7 @@ int main(int argc, char **argv) {
 
     /* (б) повторный fill того же дня — ПРАВКА (UPSERT перезаписывает) */
     put_before = g_put_count;
-    code = tracking_fill_day("Октябрь 2026", 7, "10:00", "18:00", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Октябрь 2026", 7, "10:00", "18:00", out, sizeof(out));
     printf("db fill edit: %d %s\n", code, out);
     check(code == 200 && strstr(out, "\"in\":\"10:00\"") != NULL,
           "db: повторный fill — правка (перезапись), не 409");
@@ -394,7 +382,7 @@ int main(int argc, char **argv) {
     /* (в) БД недоступна -> фоллбэк на прежний Google-путь */
     g_h_status = 500;
     put_before = g_put_count;
-    code = tracking_fill_day("Октябрь 2026", 8, "09:00", "17:00", out, sizeof(out));
+    code = tracking_fill_day(&svc, "Октябрь 2026", 8, "09:00", "17:00", out, sizeof(out));
     printf("db fallback: %d %s\n", code, out);
     check(code == 200 && g_put_count > put_before, "db: при ошибке БД сработал Google-фоллбэк");
 
@@ -405,7 +393,7 @@ int main(int argc, char **argv) {
     g_h_list_body = strdup("[{\"day\":7,\"t_in\":\"09:00\",\"t_out\":\"17:00\","
                            "\"hours\":8.0,\"amount\":4000.0}]");
     put_before = g_put_count;
-    tracking_push_pending();
+    tracking_push_pending(&svc);
     printf("push: put %d -> %d, dirty=%s\n", put_before, g_put_count,
            access("/tmp/gdirty_10.2026", R_OK) == 0 ? "есть" : "снят");
     check(access("/tmp/gdirty_10.2026", R_OK) != 0, "push: dirty-флаг снят");
@@ -414,7 +402,7 @@ int main(int argc, char **argv) {
     /* (д) удаление дня: БД первично (DELETE + dirty), Google не тронут */
     g_h_status = 204;                 /* DELETE в БД: успех */
     put_before = g_put_count;
-    code = tracking_erase_day("Октябрь 2026", 7, out, sizeof(out));
+    code = tracking_erase_day(&svc, "Октябрь 2026", 7, out, sizeof(out));
     printf("db erase: %d %s\n", code, out);
     check(code == 200 && strstr(out, "\"ok\":true") != NULL, "erase(db): отметка удалена из БД");
     check(access("/tmp/gdirty_10.2026", R_OK) == 0, "erase(db): выставлен dirty на выгрузку листа");
@@ -425,7 +413,7 @@ int main(int argc, char **argv) {
        и не отражает прошлые PUT. */
     g_h_status = 500;
     put_before = g_put_count;
-    code = tracking_erase_day("Октябрь 2026", 5, out, sizeof(out));
+    code = tracking_erase_day(&svc, "Октябрь 2026", 5, out, sizeof(out));
     printf("db erase fallback: %d %s\n", code, out);
     check(code == 200, "erase(google): очистка через Google при ошибке БД");
     check(g_put_count > put_before, "erase(google): строка перезаписана (PUT)");
@@ -435,4 +423,3 @@ int main(int argc, char **argv) {
     printf(fails ? "\nFAILED: %d\n" : "\nALL TESTS PASSED\n", fails);
     return fails ? 1 : 0;
 }
-

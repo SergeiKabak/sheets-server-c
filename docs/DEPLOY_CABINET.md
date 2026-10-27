@@ -2,7 +2,7 @@
 
 ## Что сделано
 
-1. На сервере (`main.c`) добавлен эндпоинт `GET /api/cabinet?month=...&cabinet=...&day=...`
+1. На сервере (`src/app/month_api.c` + `src/web/api_schedule.c`) добавлен эндпоинт `GET /api/cabinet?month=...&cabinet=...&day=...`
    - Возвращает JSON со списком коллег (кроме самой Бинкевич Татьяна Эдуардовна),
      которые в указанный день работают в указанном кабинете.
 2. Создан фронтенд-файл `telegram_webapp_cabinet.js` — клик по ячейке кабинета в графике
@@ -14,24 +14,20 @@
 
 ## Шаг 1. Убедиться, что сервер на Render обновлён
 
-Код в репозитории `/workspace/main.c` — это не тот же сервер, который работает по адресу
-`https://sheets-server-c.onrender.com`. Боевая версия на Render имеет свои эндпоинты
-(`/api/months`, `/api/month`), которых нет в репозитории.
+Эндпоинт `/api/cabinet` живёт в этом репозитории. Чтобы он заработал на проде,
+проверьте, что на Render задеплоен актуальный коммит:
 
-Чтобы заработал `/api/cabinet`, нужно обновить код на сервере Render:
-
-1. Откройте репозиторий на GitHub: `https://github.com/SergeiKabak/sheets-server-c`
-2. Убедитесь, что в ветке `main` есть последний коммит с `/api/cabinet`:
-   - `git log --oneline main` → должен быть `48b37c4` (merge) и `41532ad` (feat).
-3. На Render подключите репозиторий к сервису `sheets-server-c` и выполните редеплой
-   (Render 자동но соберёт Docker-образ и перезапустит контейнер).
-4. Проверьте эндпоинт в браузере:
+1. Откройте `https://sheets-server-c.onrender.com/version` — в ответе
+   `"commit"` должен совпадать с последним коммитом ветки `main` на GitHub.
+2. Если не совпадает — на Render выполните редеплой сервиса `sheets-server-c`
+   (Render автоматически соберёт Docker-образ и перезапустит контейнер).
+3. Проверьте эндпоинт в браузере:
    ```
    https://sheets-server-c.onrender.com/api/cabinet?month=Октябрь%202026&cabinet=К2.1&day=5
    ```
    Ожидаемый ответ:
    ```json
-   {"cabinet":"К2.1","month":"Октябрь 2026","day":5,"colleagues":[{"name":"...","shift":"..."}]}
+   {"cabinet":"К2.1","month":"Октябрь 2026","day":5,"shift":"","colleagues":[{"name":"...","shift":"..."}]}
    ```
 
 ---
@@ -73,7 +69,8 @@
 - Если ячейка пустая — клик не сработает.
 - Если сервер вернул пустой список `colleagues` — показывается сообщение, что никто другой не работает в этом кабинете в этот день.
 - Для кириллицы в названиях месяцев и имен кабинетов используется URL-кодирование
-  (`encodeURIComponent` на клиенте, `url_decode` на сервере).
+  (`encodeURIComponent` на клиенте, `url_query_param`/`url_decode_into` из
+  `src/core/url_codec.c` на сервере).
 
 ---
 
@@ -81,6 +78,11 @@
 
 | Файл | Назначение |
 |------|------------|
-| `main.c` | C-сервер с эндпоинтом `/api/cabinet` |
+| `src/app/month_api.c` | Сценарий `/api/cabinet` (сборка ответа: БД → файловый индекс) |
+| `src/web/api_schedule.c` | HTTP-обработчик `/api/cabinet` (пишет ответ в сокет) |
+| `src/app/schedule_service.c` | Коллеги из БД и из индексного файла |
+| `src/domain/schedule.c` | Список коллег и его печать в JSON (чистые функции) |
 | `telegram_webapp_cabinet.js` | Фронтенд для Telegram Web App |
 | `DEPLOY_CABINET.md` | Эта инструкция |
+
+Полная карта модулей — в `ARCHITECTURE.md`.

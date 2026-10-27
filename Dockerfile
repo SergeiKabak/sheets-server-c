@@ -5,7 +5,8 @@ WORKDIR /build
 
 COPY . .
 
-RUN gcc -O2 -Wall -Wextra -o server_app main.c tracking.c cJSON.c http.c supabase.c -l:libcurl.so.4
+# Исходники разбиты по слоям в src/ (core -> domain -> infra -> app -> web/server)
+RUN gcc -O2 -Wall -Wextra -Isrc -o server_app $(find src -name '*.c') -l:libcurl.so.4
 
 # --- ЭТАП 2: Финальный запуск ---
 FROM debian:bookworm-slim

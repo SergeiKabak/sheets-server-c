@@ -1,28 +1,10 @@
+#include "infra/http_client.h"
+
+#include "vendor/curl_mini.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdarg.h>
-#include "curl_mini.h"
-
-/* ---------- URL-кодирование для application/x-www-form-urlencoded ---------- */
-char *url_encode(const char *s) {
-    if (!s) return NULL;
-    size_t len = strlen(s);
-    char *out = malloc(len * 3 + 1);
-    if (!out) return NULL;
-    size_t o = 0;
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-            out[o++] = c;
-        } else {
-            o += snprintf(out + o, 4, "%%%02X", c);
-        }
-    }
-    out[o] = '\0';
-    return out;
-}
 
 /* ---------- коллбэк записи тела ответа ---------- */
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
@@ -190,9 +172,9 @@ static size_t header_store_cb(void *ptr, size_t size, size_t nmemb, void *userda
 /* Универсальный запрос с дополнительными заголовками.
    extra — NULL-terminated массив строк "Name: value". */
 char *http_request_h(const char *method, const char *url,
-                 const char *content_type, const char *body,
-                 const char *const *extra, int *status,
-                 char *hdr_out, size_t hdr_cap) {
+                     const char *content_type, const char *body,
+                     const char *const *extra, int *status,
+                     char *hdr_out, size_t hdr_cap) {
     if (status) *status = 0;
     if (hdr_out && hdr_cap) hdr_out[0] = '\0';
     CURL *curl = curl_easy_init();
@@ -247,8 +229,8 @@ char *http_request_h(const char *method, const char *url,
 /* Универсальный запрос с возвратом тела ответа и HTTP-кода.
    caller отвечает за free(out). */
 char *http_request_full(const char *method, const char *url,
-                 const char *content_type, const char *body,
-                 const char *bearer, int *status) {
+                        const char *content_type, const char *body,
+                        const char *bearer, int *status) {
     char auth[520];
     const char *extra[2] = { NULL, NULL };
     if (bearer && *bearer) {
