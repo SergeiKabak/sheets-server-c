@@ -98,8 +98,10 @@ body[data-theme='dark'] .cal-d.done { background: #1c3325; border-color: #2e5b3d
 }
 .trk-box h4 { margin: 0 0 12px; font-size: 16px }
 .trk-box label { display: block; margin: 10px 0 4px; font-size: 13px; opacity: .8 }
+.trk-box .time-row { display: flex; align-items: center; gap: 8px; margin-top: 10px }
+.trk-box .time-row label { display: inline-block; margin: 0; flex: none; width: auto }
 .trk-box input {
-  width: 100%; box-sizing: border-box; padding: 10px;
+  flex: none; width: 44%; min-width: 90px; max-width: 110px; box-sizing: border-box; padding: 10px;
   border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg); color: var(--fg); font-size: 16px;
 }
