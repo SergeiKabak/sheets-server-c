@@ -195,6 +195,8 @@ int main(int argc, char **argv) {
     setenv("HOURLY_RATE", "500", 1);
     setenv("TZ_OFFSET_SECONDS", "10800", 1);
     setenv("GOOGLE_API_BASE", "http://fake", 1);
+    setenv("TRK_TOKEN_CACHE", "/tmp/test_trk_sa_token", 1);
+    remove("/tmp/test_trk_sa_token");
     setenv("GOOGLE_DRIVE_BASE", "http://fake", 1);
 
     char out[16384];

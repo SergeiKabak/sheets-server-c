@@ -1123,19 +1123,144 @@ static int build_month_arrays_json(const MonthEntry *m,
    они берутся из своего кэша, который инвалидируется при записи. */
 #define MONTH_RESP_TTL 600   /* старше 10 минут — не доверяем, строим заново */
 
-/* Имя файла: hex первых 48 байт заголовка листа — безопасно, без коллизий */
-static int month_resp_path(const char *title, char *out, size_t cap) {
-    if (!title || !*title) return -1;
+/* Hex первых 48 байт заголовка листа — безопасное имя файла без коллизий */
+static int month_hex(const char *title, char *out, size_t cap) {
+    if (!title || !*title || cap < 97) return -1;
     static const char *H = "0123456789abcdef";
-    char hex[97];
     int o = 0;
     for (const unsigned char *p = (const unsigned char *)title; *p && o < 96; p++) {
-        hex[o++] = H[*p >> 4];
-        hex[o++] = H[*p & 0x0F];
+        out[o++] = H[*p >> 4];
+        out[o++] = H[*p & 0x0F];
     }
-    hex[o] = '\0';
+    out[o] = '\0';
+    return 0;
+}
+
+static int month_resp_path(const char *title, char *out, size_t cap) {
+    char hex[112];
+    if (month_hex(title, hex, sizeof(hex)) != 0) return -1;
     int n = snprintf(out, cap, "/tmp/mresp_%s.json", hex);
     return (n > 0 && (size_t)n < cap) ? 0 : -1;
+}
+
+/* ==== Кэш коллег месяца (/tmp/mcol_<hex>.json): ускорение /api/cabinet ==== */
+
+/* Собирает строки ВСЕХ сотрудников месяца из Supabase (для ответа коллег)
+   и кладёт в файл. PostgREST отдаёт максимум 1000 строк на запрос
+   (max-rows) — ходим страницами по стабильному порядку PK. */
+static int month_col_refresh(const char *title) {
+    char hex[112];
+    if (month_hex(title, hex, sizeof(hex)) != 0) return -1;
+    char *em = url_encode(title);
+    if (!em) return -1;
+
+    const size_t cap = 1024 * 1024;   /* ~1500 строк * ~150 Б + запас */
+    char *acc = malloc(cap);
+    if (!acc) { free(em); return -1; }
+    size_t alen = 0;
+    acc[alen++] = '[';
+    acc[alen] = '\0';
+
+    int offset = 0, pages = 0, ok = 1;
+    while (pages++ < 12) {
+        char path[1024];
+        snprintf(path, sizeof(path),
+                 "/schedule?month=eq.%s&select=day,employee,shift_time,cabinet"
+                 "&order=day,employee,shift_time,cabinet&limit=1000&offset=%d",
+                 em, offset);
+        int st = 0;
+        char *body = sb_get(path, &st);
+        if (!body || st < 200 || st > 299) { ok = 0; free(body); break; }
+        size_t bl = strlen(body);
+        int got = 0;
+        if (bl >= 2 && body[0] == '[' && body[bl - 1] == ']') {
+            cJSON *arr = cJSON_Parse(body);
+            if (arr) { got = cJSON_GetArraySize(arr); cJSON_Delete(arr); }
+            size_t inner = bl - 2;
+            if (inner > 0) {
+                if (alen + inner + 2 >= cap) {
+                    ok = 0;
+                } else {
+                    if (alen > 1) acc[alen++] = ',';   /* разделитель страниц */
+                    memcpy(acc + alen, body + 1, inner);
+                    alen += inner;
+                    acc[alen] = '\0';
+                }
+            }
+        } else {
+            ok = 0;
+        }
+        free(body);
+        if (!ok || got < 1000) break;
+        offset += 1000;
+    }
+    free(em);
+    if (!ok) { free(acc); return -1; }
+    acc[alen++] = ']';
+    acc[alen] = '\0';
+
+    char mpath[192], tmp[224];
+    snprintf(mpath, sizeof(mpath), "/tmp/mcol_%s.json", hex);
+    snprintf(tmp, sizeof(tmp), "%s.%d.tmp", mpath, (int)getpid());
+    FILE *f = fopen(tmp, "wb");
+    if (!f) { remove(tmp); free(acc); return -1; }
+    int bad = fwrite(acc, 1, alen, f) != alen;
+    fclose(f);
+    free(acc);
+    if (bad || rename(tmp, mpath) != 0) { remove(tmp); return -1; }
+    return 0;
+}
+
+/* Читает полный массив строк месяца; -1 если нет/устарел/повреждён */
+static int month_col_read(const char *title, char *out, size_t cap) {
+    char hex[112], path[192];
+    if (month_hex(title, hex, sizeof(hex)) != 0) return -1;
+    snprintf(path, sizeof(path), "/tmp/mcol_%s.json", hex);
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    if (time(NULL) - st.st_mtime > MONTH_RESP_TTL) return -1;
+    if (st.st_size < 2 || (size_t)st.st_size >= cap) return -1;
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t got = fread(out, 1, (size_t)st.st_size, f);
+    fclose(f);
+    out[got] = '\0';
+    if (got < 2 || out[0] != '[' || out[got - 1] != ']') return -1;
+    return 0;
+}
+
+/* Из полного массива — только строки нужного дня и кабинета,
+   в формате, который ждёт sb_colleagues_json. */
+static int month_col_filter(const char *all, int day, const char *cabinet,
+                            char *out, size_t outcap) {
+    if (!all || !cabinet || !out || outcap < 4) return -1;
+    out[0] = '\0';
+    cJSON *arr = cJSON_Parse(all);
+    if (!arr || !cJSON_IsArray(arr)) { cJSON_Delete(arr); return -1; }
+    int off = snprintf(out, outcap, "[");
+    int n = 0;
+    cJSON *it = NULL;
+    cJSON_ArrayForEach(it, arr) {
+        cJSON *jd = cJSON_GetObjectItemCaseSensitive(it, "day");
+        cJSON *jc = cJSON_GetObjectItemCaseSensitive(it, "cabinet");
+        if (!cJSON_IsNumber(jd) || !cJSON_IsString(jc) || !jc->valuestring) continue;
+        if ((int)jd->valuedouble != day || strcmp(jc->valuestring, cabinet) != 0) continue;
+        char *printed = cJSON_PrintUnformatted(it);
+        if (!printed) continue;
+        int w = snprintf(out + off, outcap - (size_t)off, "%s%s", n ? "," : "", printed);
+        free(printed);
+        if (w < 0 || (size_t)w >= outcap - (size_t)off) {
+            cJSON_Delete(arr);
+            out[0] = '\0';
+            return -1;
+        }
+        off += w;
+        n++;
+    }
+    cJSON_Delete(arr);
+    if ((size_t)off + 2 >= outcap) { out[0] = '\0'; return -1; }
+    snprintf(out + off, outcap - off, "]");
+    return 0;
 }
 
 /* Пишет {"t":...,"s1":[...],"s2":[...]} атомарно (tmp + rename) */
@@ -1313,9 +1438,27 @@ static void api_cabinet(int fd, const char *query) {
     free(em);
     off += snprintf(json + off, cap - off, "\",\"day\":%d,\"shift\":\"%s\",\"colleagues\":", day, shift);
 
-    /* Этап 2: коллеги из Supabase; при недоступности — индексный файл */
+    /* Ускорение тапа по кабинету: коллеги из кэша месяца (mcol) — без HTTP;
+       при промахе/устаревании — Supabase, затем индексный файл (фоллбэки
+       сохранены полностью) */
     int n = -1;
-    if (sb_enabled())
+    int col_cache_hit = 0;
+    {
+        char *all = malloc(512 * 1024);
+        if (all) {
+            if (month_col_read(month, all, 512 * 1024) == 0) {
+                char sub[65536];
+                if (month_col_filter(all, day, cabinet, sub, sizeof(sub)) == 0) {
+                    n = sb_colleagues_json(sub, SEARCH_NAME,
+                                           shift[0] ? shift : NULL, shifts_overlap,
+                                           json + off, cap - off - 1);
+                    if (n >= 0) col_cache_hit = 1;
+                }
+            }
+            free(all);
+        }
+    }
+    if (n < 0 && sb_enabled())
         n = sb_read_colleagues(month, day, cabinet, shift[0] ? shift : NULL,
                                json + off, cap - off - 1);
     if (n < 0)
@@ -1333,6 +1476,12 @@ static void api_cabinet(int fd, const char *query) {
     write(fd, hdr, hlen);
     write(fd, json, strlen(json));
     free(json);
+
+    /* Ответ уже отправлен — клиент не ждёт. Без кэша коллег (первый тап
+       или устарел >TTL) освежаем полный массив строк месяца под следующие
+       тапы: трафик пропорционален реальной активности. */
+    if (col_cache_hit == 0 && n >= 0)
+        month_col_refresh(month);
 }
 
 /* ---- Раздача статики Mini App (web/) ---- */
@@ -1724,6 +1873,15 @@ static void background_updater(void) {
             static time_t last_restore = 0;
             if (time(NULL) - last_restore >= TIME_RESTORE_TTL) {
                 last_restore = time(NULL);
+
+                /* Раз в сутки освежаем полный массив строк (mcol) — страховка
+                   для кабинетов, по которым давно не тапали. Активные кабинеты
+                   освежаются лениво при промахе в api_cabinet. */
+                int col_n = 0;
+                for (int i = 0; i < c; i++)
+                    if (month_col_refresh(mo[i].title) == 0) col_n++;
+                fprintf(stderr, "[updater] month colleagues cached: %d\n", col_n);
+
                 int days_done = 0, months_done = 0, errs = 0;
                 for (int i = 0; i < c; i++) {
                     char js[16384];

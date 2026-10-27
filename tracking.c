@@ -39,6 +39,16 @@ static double atof_comm(const char *s) {
 
 #define TRK_BUF       (256 * 1024)
 #define TRK_KEYFILE   "/tmp/trk_sa_key.pem"
+/* Кэш access_token между fork-процессами: без него КАЖДЫЙ запрос заново
+   пишет PEM-ключ, гоняет openssl для подписи JWT и ходит в OAuth
+   (+0.2-0.5 с к каждому вызову Google). Формат: "<exp_unix>\n<token>". */
+#define TRK_TOKEN_FILE "/tmp/trk_sa_token"
+/* Путь можно переопределить (тесты подставляют свой, чтобы не мусорить
+   в общем /tmp и не ломать последующие живые прогоны) */
+static const char *trk_token_file(void) {
+    const char *p = getenv("TRK_TOKEN_CACHE");
+    return (p && *p) ? p : TRK_TOKEN_FILE;
+}
 #define TRK_INFILE    "/tmp/trk_jwt_in.txt"
 #define TRK_SIGFILE   "/tmp/trk_jwt_sig.bin"
 #define TRK_INITFILE  "/tmp/trk_initdata.txt"
@@ -336,6 +346,30 @@ static unsigned char *hmac_sha256(const char *hexkey, const char *data_file,
 static const char *sa_access_token(void) {
     if (g_token && time(NULL) < g_token_exp - 60) return g_token;
 
+    /* Файловый кэш токена (переживает fork-процессы) */
+    {
+        FILE *tf = fopen(trk_token_file(), "r");
+        if (tf) {
+            char expl[32] = "", tok[8192] = "";
+            long fexp = 0;
+            if (fgets(expl, sizeof(expl), tf)) fexp = strtol(expl, NULL, 10);
+            if (fgets(tok, sizeof(tok), tf)) {
+                char *nl = strchr(tok, '\n');
+                if (nl) *nl = '\0';
+            }
+            fclose(tf);
+            if (tok[0] && fexp > time(NULL) + 60) {
+                char *dup = strdup(tok);
+                if (dup) {
+                    free(g_token);
+                    g_token = dup;
+                    g_token_exp = fexp;
+                    return g_token;
+                }
+            }
+        }
+    }
+
     char *email = json_get_string(g_sa_json, "client_email");
     char *pkey  = json_get_string(g_sa_json, "private_key");
     char *turi  = json_get_string(g_sa_json, "token_uri");
@@ -441,6 +475,22 @@ static const char *sa_access_token(void) {
     g_token = tok;
     g_token_exp = now + exp - 120;
     trk_log("access token obtained");
+
+    /* кладём токен в файл: атомарно (tmp+rename), права 600 — читатели
+       (другие форк-процессы) не увидят частичную запись */
+    {
+        char tmp[TRK_TMPMAX + 16];
+        snprintf(tmp, sizeof(tmp), "%s.%d.tmp", trk_token_file(), (int)getpid());
+        FILE *tf = fopen(tmp, "w");
+        if (tf) {
+            fprintf(tf, "%ld\n%s\n", (long)g_token_exp, g_token);
+            fclose(tf);
+            chmod(tmp, 0600);
+            if (rename(tmp, trk_token_file()) != 0) remove(tmp);
+        } else {
+            remove(tmp);
+        }
+    }
     return g_token;
 }
 
@@ -1711,8 +1761,17 @@ static int tracking_days_build(const char *month, char *out, size_t cap) {
     return 200;
 }
 
+/* Монотонные миллисекунды — для диагностики длительности шагов */
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)(ts.tv_sec * 1000L + ts.tv_nsec / 1000000L);
+}
+
 /* Публичная версия: сначала свежий локальный кэш, затем Google.
-   Кэш обновляет background_updater() раз в 60 секунд. */
+   Кэш обновляет background_updater() раз в 60 секунд.
+   В stderr пишется разбивка времени (источник + merge) — помогает
+   находить, где именно дорогой запрос. */
 int tracking_days_json(const char *month, char *out, size_t cap) {
     if (!out || cap < 128) return 500;
     out[0] = '\0';
@@ -1723,16 +1782,23 @@ int tracking_days_json(const char *month, char *out, size_t cap) {
         snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный месяц\"}");
         return 400;
     }
+    long t0 = now_ms();
     if (trk_cache_read(tab, out, cap, TRK_CACHE_TTL) == 0) {
+        long t1 = now_ms();
         trk_merge_time_db(tab, out, cap);
+        fprintf(stderr, "[trk] days %s: cache %ldms merge %ldms\n",
+                tab, t1 - t0, now_ms() - t1);
         return 200;
     }
 
     int code = tracking_days_build(month, out, cap);
+    long t1 = now_ms();
     if (code == 200) {
         trk_cache_write(tab, out);
         trk_merge_time_db(tab, out, cap);
     }
+    fprintf(stderr, "[trk] days %s: google %ldms merge %ldms code=%d\n",
+            tab, t1 - t0, now_ms() - t1, code);
     return code;
 }
 
