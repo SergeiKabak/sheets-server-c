@@ -83,18 +83,25 @@ int schedule_parse_rows(const char *json, SheetCells **rows_out, int **row_lens_
         if (!cJSON_IsArray(row_item)) continue;
         if (count >= cap) {
             cap *= 2;
-            rows = realloc(rows, sizeof(SheetCells) * (size_t)cap);
-            lens = realloc(lens, sizeof(int) * (size_t)cap);
-            if (!rows || !lens) break;
+            /* перевыделение через временную переменную: при неудаче старый
+               блок остаётся валиден и освободится через schedule_free_rows */
+            SheetCells *rows2 = realloc(rows, sizeof(SheetCells) * (size_t)cap);
+            int *lens2 = realloc(lens, sizeof(int) * (size_t)cap);
+            if (rows2) rows = rows2;
+            if (lens2) lens = lens2;
+            if (!rows2 || !lens2) break;
         }
         int len = 0;
         char **cells = NULL;
         cJSON *cell = NULL;
         cJSON_ArrayForEach(cell, row_item) {
             if (!cJSON_IsString(cell) || !cell->valuestring) continue;
-            cells = realloc(cells, sizeof(char *) * (size_t)(len + 1));
-            if (!cells) break;
-            cells[len++] = strdup(cell->valuestring);
+            void *cells2 = realloc(cells, sizeof(char *) * (size_t)(len + 1));
+            if (!cells2) break;   /* старый cells всё ещё валиден */
+            cells = cells2;
+            char *dup = strdup(cell->valuestring);
+            if (!dup) break;
+            cells[len++] = dup;
         }
         if (!cells) continue;
         rows[count] = cells;
