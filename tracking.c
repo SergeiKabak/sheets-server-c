@@ -20,7 +20,9 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include "http.h"
+#include "cJSON.h"
 #include "supabase.h"
 
 static double atof_comm(const char *s) {
@@ -1348,6 +1350,9 @@ static int append_row(const char *const cells[6]) {
 
 static int tracking_ensure_spreadsheet(void);
 static void api_tracking_diag(int fd, const char *query);
+/* флаги «месяц ждёт выгрузки в Google» (опред. ниже, рядом с кэшем) */
+static void dirty_put(const char *tab);
+static void dirty_clear(const char *tab);
 static void trk_cache_invalidate(const char *tab);
 
 /* Ответ клиенту */
@@ -1380,18 +1385,15 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
        нужно подготовить здесь же — иначе не будет ключа сервисного аккаунта
        и ID таблицы ("нет доступа к таблице"). */
     tracking_ensure_init();
-    if (!g_sheet_id) {
-        if (tracking_ensure_spreadsheet() != 0) {
-            char *e = json_escape_local(g_last_error[0] ? g_last_error
-                                        : "нет доступа к таблице");
-            snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "нет доступа к таблице");
-            free(e);
-            return 500;
-        }
-    }
 
     if (!action || !*action) {
         snprintf(out, cap, "{\"ok\":false,\"error\":\"не указано действие\"}");
+        return 400;
+    }
+    int is_in = (strcmp(action, "in") == 0);
+    int is_out = (strcmp(action, "out") == 0);
+    if (!is_in && !is_out) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неизвестное действие\"}");
         return 400;
     }
 
@@ -1412,6 +1414,92 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
     strftime(time_s, sizeof(time_s), "%H:%M", &tm);
 
     current_month_name(g_current_sheet, sizeof(g_current_sheet));
+    int day = atoi(date);   /* "05.10.2026" -> 5 */
+
+    /* ==== БД — первоисточник: запись сразу в time_entries ==== */
+    if (sb_enabled()) {
+        char d_in[16] = "", d_out[16] = "";
+        int rd = sb_time_day_read(g_current_sheet, day,
+                                  d_in, sizeof(d_in), d_out, sizeof(d_out),
+                                  NULL, 0, NULL, 0);
+        if (is_in && rd == 0 && d_in[0]) {
+            char *e = json_escape_local("Уже отмечен приход сегодня");
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\",\"time\":\"%s\"}",
+                     e ? e : "", time_s);
+            free(e);
+            free(name);
+            return 409;
+        }
+        if (is_out && (rd != 0 || !d_in[0])) {
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"сегодня не отмечен приход\"}");
+            free(name);
+            return 409;
+        }
+        if (is_out && d_out[0]) {
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"уход уже отмечен сегодня\"}");
+            free(name);
+            return 409;
+        }
+        if (rd >= 0) {
+            int ok = 0;
+            char hours_buf[32] = "", sum_buf[32] = "";
+            if (is_in) {
+                ok = sb_time_upsert(g_current_sheet, day, time_s, "", "", "") >= 200;
+            } else {
+                int in_min = parse_hhmm(d_in), out_min = parse_hhmm(time_s);
+                double hours = 0;
+                if (in_min >= 0 && out_min >= 0) {
+                    hours = (out_min - in_min) / 60.0;
+                    if (hours < 0) hours += 24.0;
+                }
+                double rate = employee_rate_by_name(name);
+                snprintf(hours_buf, sizeof(hours_buf), "%.2f", hours);
+                snprintf(sum_buf, sizeof(sum_buf), "%.2f", atof_comm(hours_buf) * rate);
+                ok = sb_time_upsert(g_current_sheet, day, d_in, time_s,
+                                    hours_buf, sum_buf) >= 200;
+            }
+            if (ok) {
+                dirty_put(g_current_sheet);
+                trk_cache_invalidate(g_current_sheet);
+                char *en = json_escape_local(name);
+                if (is_in) {
+                    snprintf(out, cap,
+                             "{\"ok\":true,\"action\":\"in\",\"name\":\"%s\","
+                             "\"date\":\"%s\",\"time\":\"%s\"}",
+                             en ? en : "", date, time_s);
+                    trk_log("CLOCK IN(db): %s date=%s time=%s", name, date, time_s);
+                } else {
+                    snprintf(out, cap,
+                             "{\"ok\":true,\"action\":\"out\",\"name\":\"%s\","
+                             "\"date\":\"%s\",\"time\":\"%s\","
+                             "\"hours\":\"%s\",\"sum\":\"%s\"}",
+                             en ? en : "", date, time_s, hours_buf, sum_buf);
+                    trk_log("CLOCK OUT(db): %s date=%s time=%s hours=%s sum=%s",
+                            name, date, time_s, hours_buf, sum_buf);
+                }
+                free(en);
+                free(name);
+                return 200;
+            }
+            trk_log("clock: БД недоступна, фоллбэк Google");
+        } else {
+            trk_log("clock: ошибка чтения БД, фоллбэк Google");
+        }
+        /* фоллбэк: недоступна БД — прежний путь через Google */
+    }
+
+    /* Google — фоллбэк: ключ и таблица (как раньше) */
+    if (!g_sheet_id) {
+        if (tracking_ensure_spreadsheet() != 0) {
+            char *e = json_escape_local(g_last_error[0] ? g_last_error
+                                        : "нет доступа к таблице");
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}",
+                     e ? e : "нет доступа к таблице");
+            free(e);
+            free(name);
+            return 500;
+        }
+    }
 
     TRows rows;
     memset(&rows, 0, sizeof(rows));
@@ -1609,6 +1697,27 @@ static void trk_cache_invalidate(const char *tab) {
     if (trk_cache_path(tab, path, sizeof(path)) == 0) remove(path);
 }
 
+/* Флаг «месяц нужно выгрузить в Google» (/tmp/gdirty_<tab>).
+   Ставится после УСПЕШНОЙ записи в БД (БД — первоисточник), снимается
+   после успешной выгрузки в Google фоновым циклом. Имя — только цифры
+   и точки (как в trk_cache_path). */
+static void dirty_put(const char *tab) {
+    if (!tab || !*tab || strlen(tab) > 16) return;
+    for (const char *p = tab; *p; p++)
+        if (!isdigit((unsigned char)*p) && *p != '.') return;
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/gdirty_%s", tab);
+    FILE *f = fopen(path, "w");
+    if (f) { fputs("1", f); fclose(f); }
+}
+
+static void dirty_clear(const char *tab) {
+    if (!tab || !*tab || strlen(tab) > 16) return;
+    char path[64];
+    snprintf(path, sizeof(path), "/tmp/gdirty_%s", tab);
+    remove(path);
+}
+
 /* GET /api/tracking/days?month=Октябрь 2026
    Строит ответ напрямую из Google Sheets (без кэша). */
 static int tracking_days_build(const char *month, char *out, size_t cap) {
@@ -1616,13 +1725,6 @@ static int tracking_days_build(const char *month, char *out, size_t cap) {
     out[0] = '\0';
 
     tracking_ensure_init();
-    if (!g_sheet_id && tracking_ensure_spreadsheet() != 0) {
-        char *e = json_escape_local(g_last_error[0] ? g_last_error
-                                    : "нет доступа к таблице");
-        snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "");
-        free(e);
-        return 500;
-    }
 
     char tab[64];
     int pmon = 0, pyear = 0;
@@ -1715,10 +1817,48 @@ static long now_ms(void) {
     return (long)(ts.tv_sec * 1000L + ts.tv_nsec / 1000000L);
 }
 
-/* Публичная версия: сначала свежий локальный кэш, затем Google.
-   Кэш обновляет background_updater() раз в 60 секунд.
-   В stderr пишется разбивка времени (источник + merge) — помогает
-   находить, где именно дорогой запрос. */
+/* Ответ дней из time_entries (БД — первоисточник). 0 — успех, -1 — нет
+   данных/БД недоступна (вызывающая сторона уходит в фоллбэк Google). */
+static int tracking_days_from_db(const char *month, char *out, size_t cap) {
+    if (!sb_enabled() || !out || cap < 128) return -1;
+    char tab[64];
+    int pmon = 0, pyear = 0;
+    if (month_sheet_and_parts(month, tab, sizeof(tab), &pmon, &pyear) != 0) return -1;
+
+    char *et = url_encode(tab);
+    if (!et) return -1;
+    char path[512];
+    snprintf(path, sizeof(path),
+             "/time_entries?month=eq.%s&select=day,t_in,t_out,hours,amount&order=day",
+             et);
+    free(et);
+
+    int st = 0;
+    char *body = sb_get(path, &st);
+    if (!body || st < 200 || st > 300) { free(body); return -1; }
+    char days[16384];
+    int ok = (sb_time_days_json(body, days, sizeof(days)) == 0);
+    free(body);
+    if (!ok) return -1;
+
+    char today[32], label[128];
+    current_datetime(today, sizeof(today), NULL, 0);
+    tracking_month_label(tab, label, sizeof(label));
+    char *em = json_escape_local(tab);
+    char *el = json_escape_local(label);
+    int n = snprintf(out, cap,
+                     "{\"ok\":true,\"month\":\"%s\",\"label\":\"%s\","
+                     "\"today\":\"%s\",\"days\":%s}",
+                     em ? em : "", el ? el : "", today, days);
+    free(em);
+    free(el);
+    return (n > 0 && (size_t)n < cap) ? 0 : -1;
+}
+
+/* Публичная версия: кэш -> БД (первоисточник) -> Google (фоллбэк).
+   Кэш обновляет background_updater() раз в 60 с из БД; при записи он
+   инвалидируется, поэтому следующий запрос уходит в БД за свежим.
+   В stderr пишется источник и длительность. */
 int tracking_days_json(const char *month, char *out, size_t cap) {
     if (!out || cap < 128) return 500;
     out[0] = '\0';
@@ -1729,17 +1869,19 @@ int tracking_days_json(const char *month, char *out, size_t cap) {
         snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный месяц\"}");
         return 400;
     }
-    /* Слияние с time_entries убрано (вариант 1): БД и так полна — запись
-       идёт только ПОСЛЕ успешной записи в Google (write-through), поэтому
-       БД ⊆ Google и merge не добавлял данных, но стоил 0.6-0.9 с на каждый
-       вызов. Правки в дашборде Supabase в Mini App не отражаются — правьте
-       Time tracking в Google Sheets (первоисточник). */
     long t0 = now_ms();
+    /* 1) свежий локальный кэш (обновляется из БД фоном и после записи) */
     if (trk_cache_read(tab, out, cap, TRK_CACHE_TTL) == 0) {
         fprintf(stderr, "[trk] days %s: cache %ldms\n", tab, now_ms() - t0);
         return 200;
     }
-
+    /* 2) БД — первоисточник (правки дашборда видны сразу) */
+    if (tracking_days_from_db(month, out, cap) == 0) {
+        trk_cache_write(tab, out);
+        fprintf(stderr, "[trk] days %s: db %ldms\n", tab, now_ms() - t0);
+        return 200;
+    }
+    /* 3) фоллбэк: Google Sheets */
     int code = tracking_days_build(month, out, cap);
     if (code == 200) trk_cache_write(tab, out);
     fprintf(stderr, "[trk] days %s: google %ldms code=%d\n",
@@ -1817,9 +1959,13 @@ int tracking_cache_refresh(const char *const *months, int count) {
                 if (tabs[j] && strcmp(tabs[j], tab) == 0) { exists = 1; break; }
             }
         }
-        int code = (have_tabs && !exists)
-                 ? tracking_days_empty(months[i], out, sizeof(out))
-                 : tracking_days_build(months[i], out, sizeof(out));
+        /* Кэш дней строим из БД (первоисточник): правки в дашборде
+           отражаются в Mini App в течение 60 с. Google — только фоллбэк. */
+        int code = tracking_days_from_db(months[i], out, sizeof(out)) == 0
+                 ? 200
+                 : ((have_tabs && !exists)
+                        ? tracking_days_empty(months[i], out, sizeof(out))
+                        : tracking_days_build(months[i], out, sizeof(out)));
         if (code != 200) continue;
         if (trk_cache_write(tab, out) == 0) ok++;
     }
@@ -1902,6 +2048,64 @@ int tracking_fill_day(const char *month, int day, const char *in_time,
 
     if (!name) {
         snprintf(out, cap, "{\"ok\":false,\"error\":\"не указано имя сотрудника\"}");
+        return 500;
+    }
+
+    /* ==== БД — первоисточник: запись сразу в time_entries ==== */
+    if (sb_enabled()) {
+        char d_in[16] = "", d_out[16] = "", d_hours[32] = "", d_sum[32] = "";
+        int rd = sb_time_day_read(tab, day,
+                                  d_in, sizeof(d_in), d_out, sizeof(d_out),
+                                  d_hours, sizeof(d_hours), d_sum, sizeof(d_sum));
+        if (rd == 0 && d_in[0] && d_out[0]) {
+            char *ei = json_escape_local(d_in);
+            char *eo = json_escape_local(d_out);
+            snprintf(out, cap,
+                     "{\"ok\":false,\"error\":\"время за этот день уже отмечено\","
+                     "\"date\":\"%s\",\"in\":\"%s\",\"out\":\"%s\"}",
+                     date, ei ? ei : "", eo ? eo : "");
+            free(ei); free(eo);
+            free(name);
+            return 409;
+        }
+        if (rd >= 0) {
+            /* ставка — из окружения: лист больше не первоисточник */
+            double rate = employee_rate_by_name(name);
+            double hours = (out_min - in_min) / 60.0;
+            if (hours < 0) hours += 24.0;
+            char hours_buf[32], sum_buf[32];
+            snprintf(hours_buf, sizeof(hours_buf), "%.2f", hours);
+            snprintf(sum_buf, sizeof(sum_buf), "%.2f", atof_comm(hours_buf) * rate);
+
+            if (sb_time_upsert(tab, day, norm_in, norm_out, hours_buf, sum_buf) >= 200) {
+                dirty_put(tab);                 /* выгрузка в Google — фоном */
+                trk_cache_invalidate(tab);      /* следующий days уйдёт в БД */
+                char *en = json_escape_local(name);
+                snprintf(out, cap,
+                         "{\"ok\":true,\"name\":\"%s\",\"month\":\"%s\",\"date\":\"%s\","
+                         "\"day\":%d,\"in\":\"%s\",\"out\":\"%s\","
+                         "\"hours\":\"%s\",\"sum\":\"%s\"}",
+                         en ? en : "", tab, date, day, norm_in, norm_out,
+                         hours_buf, sum_buf);
+                free(en);
+                trk_log("FILL(db): %s date=%s in=%s out=%s hours=%s sum=%s",
+                        name, date, norm_in, norm_out, hours_buf, sum_buf);
+                free(name);
+                return 200;
+            }
+            trk_log("fill: БД недоступна, фоллбэк Google (tab=%s day=%d)", tab, day);
+        } else {
+            trk_log("fill: ошибка чтения БД, фоллбэк Google (tab=%s day=%d)", tab, day);
+        }
+        /* фоллбэк: недоступна БД — прежний путь через Google */
+    }
+
+    if (!g_sheet_id && tracking_ensure_spreadsheet() != 0) {
+        char *e = json_escape_local(g_last_error[0] ? g_last_error
+                                    : "нет доступа к таблице");
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"%s\"}", e ? e : "");
+        free(e);
+        free(name);
         return 500;
     }
 
@@ -2006,6 +2210,203 @@ fill_finish:
     trows_free(&rows);
     free(name);
     return code;
+}
+
+/* ==================================================================
+ * Шаг перехода: выгрузка БД -> Google Sheets (БД — первоисточник,
+ * Google — архив/отчёт для людей). Чужие блоки листа не трогаются:
+ * лист читается актуальным и перезаписывается целиком (как fill/clock).
+ * ================================================================== */
+
+/* Выгружает месяц: строки СВОЕГО блока берутся из time_entries —
+   новые вставляются, пропавшие очищаются (ставку в колонке E не трогаем).
+   0 — успех; dirty-флаг снимается только при успехе. */
+static int tracking_push_month(const char *tab, char *err, size_t errcap) {
+    if (!err || errcap == 0) return -1;
+    err[0] = '\0';
+    if (!tab || !*tab) { snprintf(err, errcap, "нет месяца"); return -1; }
+
+    tracking_ensure_init();
+    if (!g_sheet_id && tracking_ensure_spreadsheet() != 0) {
+        snprintf(err, errcap, "%.*s", (int)(errcap - 1),
+                 g_last_error[0] ? g_last_error : "нет таблицы");
+        return -1;
+    }
+
+    const char *sn = getenv("SEARCH_NAME");
+    char *name = sn && *sn ? strdup(sn) : strdup("Сотрудник");
+    if (!name) { snprintf(err, errcap, "нет имени сотрудника"); return -1; }
+
+    int pm = 0, py = 0;
+    char t2[64];
+    if (month_sheet_and_parts(tab, t2, sizeof(t2), &pm, &py) != 0) {
+        snprintf(err, errcap, "неверный месяц");
+        free(name);
+        return -1;
+    }
+
+    /* 1) дни месяца из БД */
+    char *et = url_encode(tab);
+    if (!et) { free(name); snprintf(err, errcap, "нет памяти"); return -1; }
+    char path[512];
+    snprintf(path, sizeof(path),
+             "/time_entries?month=eq.%s&select=day,t_in,t_out,hours,amount&order=day",
+             et);
+    free(et);
+    int st = 0;
+    char *body = sb_get(path, &st);
+    if (!body || st < 200 || st > 300) {
+        free(body);
+        free(name);
+        snprintf(err, errcap, "БД недоступна (HTTP %d)", st);
+        return -1;
+    }
+    cJSON *db = cJSON_Parse(body);
+    free(body);
+    if (!db || !cJSON_IsArray(db)) {
+        cJSON_Delete(db);
+        free(name);
+        snprintf(err, errcap, "БД: битый ответ");
+        return -1;
+    }
+
+    int rc = -1;
+    TRows rows;
+    memset(&rows, 0, sizeof(rows));
+    if (load_or_create_month_sheet(tab, &rows) != 0) {
+        snprintf(err, errcap, "лист недоступен: %.*s",
+                 (int)(errcap > 32 ? errcap - 32 : 1), g_last_error[0] ? g_last_error : "");
+        goto finish;
+    }
+
+    int block = find_employee_block(&rows, name);
+    if (block < 0) {
+        /* блока ещё нет: разделитель + строка ФИО (как при первой записи) */
+        trows_insert(&rows, rows.count);
+        trows_insert(&rows, rows.count);
+        int ni = rows.count - 1;
+        free(rows.row[ni].cell[0]);
+        rows.row[ni].cell[0] = strdup(name);
+        block = ni;
+    }
+
+    int have_day[32] = { 0 };
+    double rate = employee_rate_by_name(name);
+    char rate_buf[32];
+    snprintf(rate_buf, sizeof(rate_buf), "%.2f", rate);
+
+    /* 2) строки-дни из БД -> в лист */
+    cJSON *it = NULL;
+    cJSON_ArrayForEach(it, db) {
+        cJSON *jd = cJSON_GetObjectItemCaseSensitive(it, "day");
+        if (!cJSON_IsNumber(jd)) continue;
+        int d = (int)jd->valuedouble;
+        if (d < 1 || d > 31) continue;
+        have_day[d] = 1;
+
+        cJSON *ji = cJSON_GetObjectItemCaseSensitive(it, "t_in");
+        cJSON *jo = cJSON_GetObjectItemCaseSensitive(it, "t_out");
+        cJSON *jh = cJSON_GetObjectItemCaseSensitive(it, "hours");
+        cJSON *ja = cJSON_GetObjectItemCaseSensitive(it, "amount");
+        const char *vin  = (cJSON_IsString(ji) && ji->valuestring) ? ji->valuestring : "";
+        const char *vout = (cJSON_IsString(jo) && jo->valuestring) ? jo->valuestring : "";
+        char vh[32] = "", vs[32] = "";
+        if (cJSON_IsNumber(jh)) snprintf(vh, sizeof(vh), "%.2f", jh->valuedouble);
+        if (cJSON_IsNumber(ja)) snprintf(vs, sizeof(vs), "%.2f", ja->valuedouble);
+
+        char date[32];
+        snprintf(date, sizeof(date), "%02d.%02d.%04d", d, pm, py);
+        int row = find_date_row(&rows, block, date);
+        if (row < 0) {
+            int last = find_block_end(&rows, block);
+            trows_insert(&rows, last + 1);
+            row = last + 1;
+        }
+        TRow *r = &rows.row[row];
+        free(r->cell[0]); r->cell[0] = strdup(date);
+        free(r->cell[1]); r->cell[1] = strdup(vin);
+        free(r->cell[2]); r->cell[2] = strdup(vout);
+        free(r->cell[3]); r->cell[3] = strdup(vh);
+        if (cell_empty(r->cell[4])) { free(r->cell[4]); r->cell[4] = strdup(rate_buf); }
+        free(r->cell[5]); r->cell[5] = strdup(vs);
+    }
+
+    /* 3) дни листа, которых больше нет в БД — снимаем отметки (ставку храним) */
+    for (int i = block + 1; i < rows.count; i++) {
+        if (row_is_empty(&rows.row[i])) break;
+        const char *a = rows.row[i].cell[0];
+        if (cell_empty(a)) continue;
+        char nd[64];
+        normalize_date(a, nd, sizeof(nd));
+        int d = 0, m = 0, y = 0;
+        if (sscanf(nd, "%d.%d.%d", &d, &m, &y) != 3) continue;
+        if (m != pm || y != py) continue;
+        if (d >= 1 && d <= 31 && have_day[d]) continue;
+        for (int c = 1; c <= 5; c++) {
+            if (c == 4) continue;              /* E — ставка, не трогаем */
+            free(rows.row[i].cell[c]);
+            rows.row[i].cell[c] = strdup("");
+        }
+    }
+
+    if (sheets_write_rows(tab, &rows) != 0) {
+        snprintf(err, errcap, "ошибка записи в Google");
+        goto finish;                 /* dirty остаётся — повторим в цикле */
+    }
+    dirty_clear(tab);
+    trk_log("PUSH(db->google): %s ok", tab);
+    rc = 0;
+
+finish:
+    cJSON_Delete(db);
+    trows_free(&rows);
+    free(name);
+    return rc;
+}
+
+/* Обрабатывает /tmp/gdirty_* — месяцы, ждущие выгрузки после записей.
+   Вызывается фоновым циклом каждый раз. */
+void tracking_push_pending(void) {
+    if (!sb_enabled()) return;
+    DIR *d = opendir("/tmp");
+    if (!d) return;
+    char tabs[32][16];
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) && n < 32) {
+        if (strncmp(e->d_name, "gdirty_", 7) != 0) continue;
+        const char *tab = e->d_name + 7;
+        size_t tl = strlen(tab);
+        if (tl == 0 || tl > 15) continue;
+        if (strspn(tab, "0123456789.") != tl) continue;
+        snprintf(tabs[n], sizeof(tabs[0]), "%s", tab);
+        n++;
+    }
+    closedir(d);
+    for (int i = 0; i < n; i++) {
+        char err[160] = "";
+        if (tracking_push_month(tabs[i], err, sizeof(err)) != 0)
+            trk_log("PUSH fail: %s (%s)", tabs[i], err);
+    }
+}
+
+/* Выгружает в Google все месяцы (заголовки листов). Раз в сутки:
+   подхватывает ручные правки дашборда Supabase. Возвращает число
+   успешных выгрузок. */
+int tracking_push_all(const char *const *months, int nmonths) {
+    if (!sb_enabled()) return 0;
+    int ok = 0;
+    for (int i = 0; months && i < nmonths; i++) {
+        if (!months[i] || !*months[i]) continue;
+        char tab[64];
+        int pm = 0, py = 0;
+        if (month_sheet_and_parts(months[i], tab, sizeof(tab), &pm, &py) != 0)
+            continue;
+        char err[160] = "";
+        if (tracking_push_month(tab, err, sizeof(err)) == 0) ok++;
+        else trk_log("PUSH fail: %s (%s)", tab, err);
+    }
+    return ok;
 }
 
 /* Гарантирует, что вкладка месяца существует и содержит строку заголовков.

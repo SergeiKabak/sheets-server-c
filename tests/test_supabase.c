@@ -162,23 +162,6 @@ int main(void) {
     assert(sb_time_upsert("10.2026", 5, "07:30", "14:40", "7.17", "3585.00") == 0);
     assert(sb_time_upsert("10.2026", 6, "08:00", "", NULL, NULL) == 0);
 
-    /* ---------- Этап 4: восстановление БД из ответа дней Google ---------- */
-    const char *gdays =
-        "{\"ok\":true,\"month\":\"10.2026\",\"label\":\"Октябрь 2026\","
-        "\"today\":\"27.10.2026\",\"days\":{"
-        "\"5\":{\"in\":\"07:30\",\"out\":\"14:40\",\"hours\":\"7.17\",\"sum\":\"3585.00\"},"
-        "\"6\":{\"in\":\"08:00\",\"out\":\"\",\"hours\":\"\",\"sum\":\"\"}}}";
-    int er = -1;
-    /* пустой месяц -> 0, без сетевых вызовов */
-    assert(sb_time_restore("{\"ok\":true,\"month\":\"10.2026\",\"days\":{}}", &er) == 0 && er == 0);
-    /* битый JSON / нет поля month -> ошибка */
-    assert(sb_time_restore("[broken", &er) == -1 && er == 1);
-    assert(sb_time_restore("{\"days\":{\"5\":{}}}", &er) == -1 && er == 1);
-    /* полный ответ: батч собран (2 дня), база недоступна -> -1, ошибка учтена */
-    er = 0;
-    assert(sb_time_restore(gdays, &er) == -1 && er == 1);
-    assert(sb_time_restore(NULL, &er) == -1);
-
     /* ---------- Диагностика: недоступная база -> ok:false, без падения ---------- */
     {
         const char *ms[2] = { "Октябрь 2026", "Ноябрь 2026" };
@@ -190,7 +173,6 @@ int main(void) {
 
     printf("OK   этап 2: разбор месяца и коллег\n");
     printf("OK   этап 3: формат time_entries (паритет с Google), ошибка записи без падения\n");
-    printf("OK   этап 4: восстановление time_entries (пусто/битый/недоступная база)\n");
     printf("ALL TESTS PASSED\n");
     return 0;
 }

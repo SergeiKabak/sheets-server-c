@@ -25,9 +25,9 @@
 #include "supabase.h"
 
 #define CACHE_TTL 60
-/* Этап 4: раз в сутки зеркалим time_entries из Google-кэшей (восстановление
-   БД после удаления/пересоздания проекта Supabase) */
-#define TIME_RESTORE_TTL (24 * 3600)
+/* Раз в сутки: выгрузка БД -> Google (архив, включая правки дашборда
+   в Supabase) и освежение кэша коллег (mcol) */
+#define DAY_SYNC_TTL (24 * 3600)
 #define BUFFER_SIZE (512 * 1024)
 #define MAX_SHEETS 50
 #define MAX_SHEET_NAME 128
@@ -1865,53 +1865,31 @@ static void background_updater(void) {
             if (tn >= 0) fprintf(stderr, "[updater] tracking cache months: %d\n", tn);
         }
 
-        /* Этап 4: раз в сутки (и сразу при старте) зеркалим time_entries из
-           свежих кэшей дней Google: Google — источник истины, БД восстановится
-           сама, если проект Supabase пересоздали. Без лишних запросов к Google
-           — берём только что обновлённые файлы кэша. */
+        /* Выгрузка БД -> Google (Google = архив для людей):
+           - каждый цикл: месяцы, помеченные dirty_put() после записей в БД;
+           - раз в сутки: ВСЕ месяцы (подхватывает ручные правки дашборда
+             в Supabase) + освежение кэша коллег (mcol).
+           Ночной restore time_entries из Google УДАЛЁН: БД — первоисточник,
+           зеркалирование из Google затёрло бы правки, сделанные в БД. */
         if (sb_enabled() && c > 0) {
-            static time_t last_restore = 0;
-            if (time(NULL) - last_restore >= TIME_RESTORE_TTL) {
-                last_restore = time(NULL);
+            tracking_push_pending();
 
-                /* Раз в сутки освежаем полный массив строк (mcol) — страховка
-                   для кабинетов, по которым давно не тапали. Активные кабинеты
-                   освежаются лениво при промахе в api_cabinet. */
+            static time_t last_daily = 0;
+            if (time(NULL) - last_daily >= DAY_SYNC_TTL) {
+                last_daily = time(NULL);
+
                 int col_n = 0;
-                for (int i = 0; i < c; i++)
-                    if (month_col_refresh(mo[i].title) == 0) col_n++;
+                for (int i2 = 0; i2 < c; i2++)
+                    if (month_col_refresh(mo[i2].title) == 0) col_n++;
                 fprintf(stderr, "[updater] month colleagues cached: %d\n", col_n);
 
-                int days_done = 0, months_done = 0, errs = 0;
-                for (int i = 0; i < c; i++) {
-                    char js[16384];
-                    if (tracking_days_cached_json(mo[i].title, js, sizeof(js)) != 0)
-                        continue;
-                    int e = 0;
-                    int n = sb_time_restore(js, &e);
-                    if (n > 0) { days_done += n; months_done++; }
-                    errs += e;
-                }
-                fprintf(stderr, "[sync] supabase time restore: months=%d days=%d errors=%d\n",
-                        months_done, days_done, errs);
-                if (days_done || errs)
-                    sb_log("time_restore", "", days_done, errs == 0,
-                           errs ? "HTTP error при восстановлении time_entries" : "");
+                const char *titles[MAX_MONTHS];
+                int nt = 0;
+                for (int i2 = 0; i2 < c && nt < MAX_MONTHS; i2++)
+                    titles[nt++] = mo[i2].title;
+                int pushed = tracking_push_all(titles, nt);
+                fprintf(stderr, "[sync] google push months: %d\n", pushed);
             }
-        }
-        /* Кэш готовых ответов месяцев: /api/month отдаётся из файла
-           мгновенно (REST+TLS к Supabase на запрос стоили ~0.7-1 c).
-           Пишем всегда — при выключенной Supabase источником станет
-           файловый кэш месяцев. */
-        if (c > 0) {
-            char s1b[16384], s2b[16384];
-            int cached_n = 0;
-            for (int i = 0; i < c; i++) {
-                if (month_s1s2(&mo[i], s1b, sizeof(s1b), s2b, sizeof(s2b)) == 0 &&
-                    month_resp_write(mo[i].title, s1b, s2b) == 0)
-                    cached_n++;
-            }
-            fprintf(stderr, "[updater] month responses cached: %d\n", cached_n);
         }
 
         free_months(mo, c);

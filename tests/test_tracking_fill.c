@@ -11,8 +11,10 @@
 #include "tracking.c"
 
 /* ---- заглушки http.c для supabase.c (http.c в эту сборку не входит) ---- */
-static int g_h_status = 200;
-static char *g_h_body = NULL;
+static int g_h_status = 200;        /* общий/upsert (POST time_entries) */
+static char *g_h_body = NULL;       /* тело для общего запроса */
+static char *g_h_day_body = NULL;   /* ответ чтения одного дня (sb_time_day_read) */
+static char *g_h_list_body = NULL;  /* ответ списка дней месяца (push) */
 static int g_h_gets = 0;
 static char g_last_h_url[1024];
 
@@ -45,6 +47,10 @@ char *http_request_h(const char *method, const char *url,
     if (url) snprintf(g_last_h_url, sizeof(g_last_h_url), "%s", url);
     g_h_gets++;
     if (status) *status = g_h_status;
+    if (url && strstr(url, "day=eq."))            /* чтение одного дня */
+        return g_h_day_body ? strdup(g_h_day_body) : strdup("[]");
+    if (url && strstr(url, "select=day,t_in"))    /* список дней (push) */
+        return g_h_list_body ? strdup(g_h_list_body) : strdup("[]");
     return g_h_body ? strdup(g_h_body) : NULL;
 }
 
@@ -357,6 +363,52 @@ int main(int argc, char **argv) {
    БД ⊆ Google (write-through только после успеха Google), merge не добавлял
    данных, но стоил 0.6-0.9 с на каждый вызов. Моки http_request_h/url_encode
    остаются — их требует supabase.c при линковке. */
+
+    /* ==== Переход на БД-first: запись / 409 / фоллбэк / выгрузка ==== */
+    remove("/tmp/gdirty_10.2026");
+    setenv("SUPABASE_URL", "https://db.test", 1);
+    setenv("SUPABASE_SECRET_KEY", "test-key", 1);
+    unsetenv("SUPABASE_SYNC");
+    sb_init();                       /* sb_on = 1 */
+
+    /* (а) fill при отсутствии дня в БД: успех БД-пути, Google не тронут */
+    free(g_h_day_body);
+    g_h_day_body = strdup("[]");
+    g_h_status = 200;
+    int put_before = g_put_count;
+    code = tracking_fill_day("Октябрь 2026", 7, "09:00", "17:00", out, sizeof(out));
+    printf("db fill: %d %s\n", code, out);
+    check(code == 200 && strstr(out, "\"ok\":true") != NULL, "db: fill записан в БД");
+    check(g_put_count == put_before, "db: в Google не писали (запись в БД)");
+    check(access("/tmp/gdirty_10.2026", R_OK) == 0, "db: выставлен dirty-флаг");
+
+    /* (б) повторный fill того же дня -> 409 из БД */
+    free(g_h_day_body);
+    g_h_day_body = strdup("[{\"day\":7,\"t_in\":\"09:00\",\"t_out\":\"17:00\","
+                          "\"hours\":8.0,\"amount\":4000.0}]");
+    code = tracking_fill_day("Октябрь 2026", 7, "10:00", "18:00", out, sizeof(out));
+    printf("db fill 409: %d %s\n", code, out);
+    check(code == 409 && strstr(out, "уже отмечено") != NULL, "db: повторный день -> 409");
+
+    /* (в) БД недоступна -> фоллбэк на прежний Google-путь */
+    g_h_status = 500;
+    put_before = g_put_count;
+    code = tracking_fill_day("Октябрь 2026", 8, "09:00", "17:00", out, sizeof(out));
+    printf("db fallback: %d %s\n", code, out);
+    check(code == 200 && g_put_count > put_before, "db: при ошибке БД сработал Google-фоллбэк");
+
+    /* (г) выгрузка в Google: dirty обработан, строки уехали */
+    g_h_status = 200;
+    free(g_h_day_body); g_h_day_body = NULL;
+    free(g_h_list_body);
+    g_h_list_body = strdup("[{\"day\":7,\"t_in\":\"09:00\",\"t_out\":\"17:00\","
+                           "\"hours\":8.0,\"amount\":4000.0}]");
+    put_before = g_put_count;
+    tracking_push_pending();
+    printf("push: put %d -> %d, dirty=%s\n", put_before, g_put_count,
+           access("/tmp/gdirty_10.2026", R_OK) == 0 ? "есть" : "снят");
+    check(access("/tmp/gdirty_10.2026", R_OK) != 0, "push: dirty-флаг снят");
+    check(g_put_count > put_before, "push: строки уехали в Google");
 
     printf(fails ? "\nFAILED: %d\n" : "\nALL TESTS PASSED\n", fails);
     return fails ? 1 : 0;

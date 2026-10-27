@@ -52,6 +52,12 @@ int tracking_days_cached_json(const char *month, char *out, size_t cap);
    процессом раз в 60 секунд. months — названия месяцев из расписания. */
 int tracking_cache_refresh(const char *const *months, int count);
 
+/* Выгрузка БД -> Google (БД — первоисточник, Google — архив):
+   обработка /tmp/gdirty_* (после записей) и разовая выгрузка всех
+   месяцев (раз в сутки — подхватывает правки дашборда). */
+void tracking_push_pending(void);
+int tracking_push_all(const char *const *months, int nmonths);
+
 /* Заполняет отработанное время за произвольный день месяца графика.
    month — "Октябрь 2026" или "10.2026", day — 1..31,
    in_time / out_time — "ЧЧ:ММ" (например "07:30").
