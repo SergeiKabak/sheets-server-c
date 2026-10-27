@@ -264,10 +264,11 @@ int main(int argc, char **argv) {
           "fill: существующие строки сохранены");
 
     before = g_put_count;
-    code = tracking_fill_day("10.2026", 5, "07:30", "14:40", out, sizeof(out));
+    code = tracking_fill_day("10.2026", 5, "09:00", "18:00", out, sizeof(out));
     printf("fill 5 repeat: %d %s\n", code, out);
-    check(code == 409, "fill: повторная отметка запрещена");
-    check(g_put_count == before, "fill: при 409 запись не выполняется");
+    check(code == 200 && strstr(out, "\"in\":\"09:00\"") != NULL,
+          "fill: повторный fill — правка (перезапись), не 409");
+    check(g_put_count > before, "fill: правка записана");
 
     code = tracking_fill_day("Октябрь 2026", 6, "08:00", "15:00", out, sizeof(out));
     printf("fill 6: %d %s\n", code, out);
@@ -382,13 +383,13 @@ int main(int argc, char **argv) {
     check(g_put_count == put_before, "db: в Google не писали (запись в БД)");
     check(access("/tmp/gdirty_10.2026", R_OK) == 0, "db: выставлен dirty-флаг");
 
-    /* (б) повторный fill того же дня -> 409 из БД */
-    free(g_h_day_body);
-    g_h_day_body = strdup("[{\"day\":7,\"t_in\":\"09:00\",\"t_out\":\"17:00\","
-                          "\"hours\":8.0,\"amount\":4000.0}]");
+    /* (б) повторный fill того же дня — ПРАВКА (UPSERT перезаписывает) */
+    put_before = g_put_count;
     code = tracking_fill_day("Октябрь 2026", 7, "10:00", "18:00", out, sizeof(out));
-    printf("db fill 409: %d %s\n", code, out);
-    check(code == 409 && strstr(out, "уже отмечено") != NULL, "db: повторный день -> 409");
+    printf("db fill edit: %d %s\n", code, out);
+    check(code == 200 && strstr(out, "\"in\":\"10:00\"") != NULL,
+          "db: повторный fill — правка (перезапись), не 409");
+    check(g_put_count == put_before, "db: правка не трогает Google");
 
     /* (в) БД недоступна -> фоллбэк на прежний Google-путь */
     g_h_status = 500;
@@ -409,6 +410,27 @@ int main(int argc, char **argv) {
            access("/tmp/gdirty_10.2026", R_OK) == 0 ? "есть" : "снят");
     check(access("/tmp/gdirty_10.2026", R_OK) != 0, "push: dirty-флаг снят");
     check(g_put_count > put_before, "push: строки уехали в Google");
+
+    /* (д) удаление дня: БД первично (DELETE + dirty), Google не тронут */
+    g_h_status = 204;                 /* DELETE в БД: успех */
+    put_before = g_put_count;
+    code = tracking_erase_day("Октябрь 2026", 7, out, sizeof(out));
+    printf("db erase: %d %s\n", code, out);
+    check(code == 200 && strstr(out, "\"ok\":true") != NULL, "erase(db): отметка удалена из БД");
+    check(access("/tmp/gdirty_10.2026", R_OK) == 0, "erase(db): выставлен dirty на выгрузку листа");
+    check(g_put_count == put_before, "erase(db): в Google не писали (вычистит фон)");
+
+    /* (е) БД недоступна -> фоллбэк: очистка строки листа напрямую.
+       Берём день, который есть в моке листа (05.10) — GET в моке статичен
+       и не отражает прошлые PUT. */
+    g_h_status = 500;
+    put_before = g_put_count;
+    code = tracking_erase_day("Октябрь 2026", 5, out, sizeof(out));
+    printf("db erase fallback: %d %s\n", code, out);
+    check(code == 200, "erase(google): очистка через Google при ошибке БД");
+    check(g_put_count > put_before, "erase(google): строка перезаписана (PUT)");
+    check(g_last_put && strstr(g_last_put, "\"05.10.2026\",\"\",\"\",\"\",\"500\""),
+          "erase(google): приход/уход/часы/сумма д5 очищены, ставка сохранилась");
 
     printf(fails ? "\nFAILED: %d\n" : "\nALL TESTS PASSED\n", fails);
     return fails ? 1 : 0;

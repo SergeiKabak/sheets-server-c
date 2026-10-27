@@ -48,6 +48,10 @@
       return json('/api/tracking/clock' + q({ action: action }), { method: 'POST' });
     },
 
+    erase: function (month, day) {
+      return json('/api/tracking/erase' + q({ month: month, day: day }), { method: 'POST' });
+    },
+
     fill: function (month, day, inTime, outTime) {
       return json('/api/tracking/fill' + q({
         month: month, day: day, 'in': inTime, out: outTime

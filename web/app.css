@@ -109,6 +109,8 @@ body[data-theme='dark'] .cal-d.done { background: #1c3325; border-color: #2e5b3d
 .trk-box .cancel { background: #777; color: #fff }
 .trk-box button:disabled { opacity: .5 }
 .trk-err { min-height: 18px; margin-top: 8px; font-size: 13px; color: #C62828 }
+.trk-info { display: none; font-size: 13px; opacity: .75; margin-top: -4px; margin-bottom: 2px }
+.trk-box .erase { background: #C62828; color: #fff }
 
 /* Список коллег в кабинете (в том же стиле, что и диалог времени) */
 .col-list { display: flex; flex-direction: column; gap: 6px; max-height: 55vh; overflow-y: auto }

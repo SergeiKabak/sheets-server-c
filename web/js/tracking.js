@@ -45,29 +45,17 @@
     return s;
   }
 
-  /* ---------- тап по дню ---------- */
+  /* ---------- тап по дню ----------
+     Новый день — ввод; отмечённый — ПРАВКА (значения предзаполнены,
+     текущие часы/сумма показаны в подсказке модалки). */
   function dayAction(day) {
     if (!S.CAL_HAS[day]) return;
-    var rec = S.TRK[day] || null;
-    if (rec && rec.in && rec.out) {
-      var t = 'День ' + day + ' (' + (S.TRK_META.label || S.trkSelectedMonth || '') + '):\n' +
-              'Приход: ' + rec.in + '\nУход: ' + rec.out;
-      if (rec.hours) t += '\nОтработано: ' + rec.hours + ' ч.';
-      if (rec.sum) t += '\nСумма: ' + rec.sum;
-      alert(t);
-      return;
-    }
     openTrkDialog(day, '', '');
   }
 
   /* ---------- модалка ввода времени ---------- */
   function openTrkDialog(day, cabinet, shift) {
     if (!S.CAL_HAS[day]) { trkMsg('В этот день смен нет — время не вносится', false); return; }
-    var ex = S.TRK[day] || null;
-    if (ex && ex.in && ex.out) {
-      trkMsg('За день ' + day + ' время уже отмечено: ' + ex.in + '–' + ex.out, false);
-      return;
-    }
     S.trkPendingDay = day;
     S.trkPendingMonth = S.M[S.cur] || S.TRK_META.label || '';
 
@@ -82,8 +70,49 @@
                            'день ' + day + ' (' + S.trkPendingMonth + ')';
     var e = document.getElementById('trk-modal-err');
     if (e) e.textContent = '';
+    /* подсказка «что сейчас отмечено» и кнопка удаления — для отмечённых дней */
+    var cur = S.TRK[day] || null;
+    var marked = !!(cur && (cur.in || cur.out));
+    var info = document.getElementById('trk-modal-info');
+    if (info) {
+      if (marked) {
+        info.textContent = 'Сейчас отмечено: ' + (cur.in || '—') + '–' + (cur.out || '—') +
+          (cur.hours ? ' · ' + cur.hours + ' ч' : '') + (cur.sum ? ' · ' + cur.sum : '');
+        info.style.display = 'block';
+      } else {
+        info.textContent = '';
+        info.style.display = 'none';
+      }
+    }
+    var er = document.getElementById('trk-modal-erase');
+    if (er) er.style.display = marked ? '' : 'none';
+
     var m = document.getElementById('trk-modal');
     if (m) m.classList.add('open');
+  }
+
+  /* Удаление отметки дня: сервер чистит БД, лист в Google вычищается фоном */
+  function eraseTrkDialog() {
+    var e = document.getElementById('trk-modal-err');
+    var b = document.getElementById('trk-modal-erase');
+    if (!S.trkPendingDay || !S.trkPendingMonth) {
+      if (e) e.textContent = 'Не выбран день.';
+      return;
+    }
+    var day = S.trkPendingDay;
+    if (b) b.disabled = true;
+    if (e) e.textContent = '';
+    A.api.erase(S.trkPendingMonth, day).then(function (d) {
+      if (b) b.disabled = false;
+      if (d && d.ok) {
+        delete S.TRK[day];
+        A.calendar.renderTracking();
+        closeTrkDialog();
+        trkMsg('Отметка удалена: день ' + day + ' (' + S.trkPendingMonth + ')', true);
+      } else if (e) {
+        e.textContent = (d && d.error) ? d.error : 'Не удалось удалить';
+      }
+    });
   }
 
   function closeTrkDialog() {
@@ -91,6 +120,10 @@
     if (m) m.classList.remove('open');
     var e = document.getElementById('trk-modal-err');
     if (e) e.textContent = '';
+    var info = document.getElementById('trk-modal-info');
+    if (info) { info.textContent = ''; info.style.display = 'none'; }
+    var er = document.getElementById('trk-modal-erase');
+    if (er) er.style.display = 'none';
     S.trkPendingDay = 0;
     S.trkPendingMonth = '';
   }
@@ -160,10 +193,12 @@
         bm = document.getElementById('trk-money'),
         sv = document.getElementById('trk-modal-save'),
         cn = document.getElementById('trk-modal-cancel'),
+        es = document.getElementById('trk-modal-erase'),
         md = document.getElementById('trk-modal');
 
     if (sv) sv.onclick = saveTrkDialog;
     if (cn) cn.onclick = closeTrkDialog;
+    if (es) es.onclick = eraseTrkDialog;
     if (md) md.onclick = function (e) { if (e.target === md) closeTrkDialog(); };
     if (b1) b1.onclick = function () {
       b1.disabled = true; trkMsg('Сохраняем...', true);

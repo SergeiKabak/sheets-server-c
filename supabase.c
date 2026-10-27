@@ -594,6 +594,17 @@ int sb_time_days_json(const char *rows_json, char *out, size_t outcap) {
     return 0;
 }
 
+/* Удаление дня из time_entries (см. supabase.h) */
+int sb_time_day_delete(const char *month_tab, int day) {
+    if (!sb_on || !month_tab || !*month_tab || day < 1 || day > 31) return 0;
+    char *em = url_encode(month_tab);
+    if (!em) return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "/time_entries?month=eq.%s&day=eq.%d", em, day);
+    free(em);
+    return sb_call("DELETE", path, NULL);
+}
+
 /* Чтение одного дня (см. supabase.h) */
 int sb_time_day_read(const char *month_tab, int day,
                      char *in, size_t incap,

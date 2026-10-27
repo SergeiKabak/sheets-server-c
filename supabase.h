@@ -91,6 +91,11 @@ int sb_time_days_json(const char *rows_json, char *out, size_t outcap);
 /* Чтение одного дня для записи (fill/clock): GET ...&month=eq.X&day=eq.N.
    0 — день есть (строки скопированы; пустые означают незаполненный день),
    1 — дня нет, -1 — ошибка БД (вызывающая сторона уходит в фоллбэк). */
+/* Удаление дня (для «Удалить время» в Mini App): DELETE +day.
+   204 — успех (удаление отсутствующего дня тоже успех), 0 — выключено
+   или сетевая ошибка, иначе HTTP-код. */
+int sb_time_day_delete(const char *month_tab, int day);
+
 int sb_time_day_read(const char *month_tab, int day,
                      char *in, size_t incap,
                      char *out, size_t outcap,

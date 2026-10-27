@@ -45,6 +45,12 @@ async function main() {
   window.fetch = (u, o) => {
     const url = String(u);
     window.__fetches.push(url + (o && o.method ? ' [' + o.method + ']' : ''));
+    if (url.indexOf('/api/tracking/erase') >= 0) {
+      return Promise.resolve({
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify({ ok: true }))
+      });
+    }
     if (url.indexOf('/api/cabinet') >= 0) {
       // мок сервера: фильтрация коллег по пересечению смен (как в find_cabinet_colleagues)
       const all = [{ name: 'Яновская Юлия Алексеевна', shift: '8:00-14:30' },
@@ -150,13 +156,20 @@ async function main() {
 
   const alertsBefore = window.__alerts.length;
   click(cell(2));
-  ok(!modal.classList.contains('open'), 'отмеченный день: модалка не открывается');
-  ok(window.__alerts.length === alertsBefore + 1 && /Приход: 07:30/.test(window.__alerts[0]) &&
-     /Отработано: 6.5 ч/.test(window.__alerts[0]) && /Сумма: 650.00/.test(window.__alerts[0]),
-     'отработанное время показано: ' + JSON.stringify(window.__alerts[0]));
+  ok(modal.classList.contains('open'), 'отмеченный день: модалка открывается для ПРАВКИ');
+  const inVal = document.getElementById('trk-in-time').value;
+  const outVal = document.getElementById('trk-out-time').value;
+  ok(inVal === '07:30' && outVal === '14:40', 'предзаполнены текущие значения: ' + inVal + '-' + outVal);
+  const info = document.getElementById('trk-modal-info');
+  ok(info.style.display === 'block' && /Сейчас отмечено: 07:30–14:40/.test(info.textContent),
+     'подсказка о текущей отметке: ' + info.textContent);
+  const eraseBtn = document.getElementById('trk-modal-erase');
+  ok(eraseBtn.style.display === '', 'кнопка «Удалить время» видна для отмечённого дня');
+  ok(window.__alerts.length === alertsBefore, 'алерт больше не вызывается');
+  APP.tracking.closeTrkDialog();
 
   click(cell(6));
-  ok(!modal.classList.contains('open') && window.__alerts.length === alertsBefore + 1,
+  ok(!modal.classList.contains('open') && window.__alerts.length === alertsBefore,
      'день без смены: тихо');
 
   // --- коллеги: модалка в стиле диалога времени (не alert) ---
@@ -202,8 +215,9 @@ async function main() {
   APP.tracking.openTrkDialog(6, '', '');
   ok(!modal.classList.contains('open') && /смен нет/.test(st.textContent),
      'openTrkDialog отклоняет день без смены: ' + st.textContent);
-  APP.tracking.openTrkDialog(2, '', '');
-  ok(!modal.classList.contains('open'), 'openTrkDialog отклоняет отмечённый день');
+  APP.tracking.openTrkDialog(6, '', '');
+  ok(!modal.classList.contains('open') && /смен нет/.test(st.textContent),
+     'повторный guard по дню без смены работает');
 
   // --- деньги ---
   const money = document.getElementById('cal-money');
@@ -220,6 +234,24 @@ async function main() {
   click(document.getElementById('trk-money'));
   ok(!cal.classList.contains('show-sum'), 'повторный тап скрывает суммы');
   ok(st.style.display === 'none', 'при выключении баннер прячется (итог виден в инфоблоке)');
+
+  // --- удаление отметки дня: открыть диалог правки и нажать «Удалить» ---
+  click(cell(2));
+  ok(modal.classList.contains('open') && eraseBtn.style.display === '',
+     'диалог правки снова открыт, кнопка удаления видна');
+  window.__fetches = [];
+  eraseBtn.click();
+  ok(window.__fetches.some(u => /\/api\/tracking\/erase/.test(u)),
+     'клик «Удалить время» -> POST /api/tracking/erase: ' + decodeURIComponent(window.__fetches[0] || ''));
+  await tick();
+  ok(!modal.classList.contains('open'), 'после удаления модалка закрыта');
+  ok(!cell(2).classList.contains('cal-done'), 'день снова не отмечен (✓ убран)');
+  click(cell(2));
+  ok(modal.classList.contains('open'), 'день снова кликабелен: диалог ввода открывается');
+  APP.tracking.closeTrkDialog();
+  ok(/Отметка удалена/.test(st.textContent), 'баннер: ' + st.textContent);
+  ok(document.getElementById('trk-modal-info').style.display !== 'block',
+     'подсказка скрыта (день больше не отмечен)');
 
   // --- формат месяца 10.2026 ---
   APP.calendar.showTable({ t: '10.2026', s1, s2, trk: null });  // trk:null -> loadTracking

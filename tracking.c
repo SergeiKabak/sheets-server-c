@@ -1444,7 +1444,8 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
             int ok = 0;
             char hours_buf[32] = "", sum_buf[32] = "";
             if (is_in) {
-                ok = sb_time_upsert(g_current_sheet, day, time_s, "", "", "") >= 200;
+                int st = sb_time_upsert(g_current_sheet, day, time_s, "", "", "");
+                ok = (st >= 200 && st < 300);
             } else {
                 int in_min = parse_hhmm(d_in), out_min = parse_hhmm(time_s);
                 double hours = 0;
@@ -1455,8 +1456,9 @@ int tracking_do_clock(const char *action, char *out, size_t cap) {
                 double rate = employee_rate_by_name(name);
                 snprintf(hours_buf, sizeof(hours_buf), "%.2f", hours);
                 snprintf(sum_buf, sizeof(sum_buf), "%.2f", atof_comm(hours_buf) * rate);
-                ok = sb_time_upsert(g_current_sheet, day, d_in, time_s,
-                                    hours_buf, sum_buf) >= 200;
+                int st = sb_time_upsert(g_current_sheet, day, d_in, time_s,
+                                        hours_buf, sum_buf);
+                ok = (st >= 200 && st < 300);
             }
             if (ok) {
                 dirty_put(g_current_sheet);
@@ -2051,52 +2053,37 @@ int tracking_fill_day(const char *month, int day, const char *in_time,
         return 500;
     }
 
-    /* ==== БД — первоисточник: запись сразу в time_entries ==== */
+    /* ==== БД — первоисточник: запись/ПРАВКА сразу в time_entries ==== */
     if (sb_enabled()) {
-        char d_in[16] = "", d_out[16] = "", d_hours[32] = "", d_sum[32] = "";
-        int rd = sb_time_day_read(tab, day,
-                                  d_in, sizeof(d_in), d_out, sizeof(d_out),
-                                  d_hours, sizeof(d_hours), d_sum, sizeof(d_sum));
-        if (rd == 0 && d_in[0] && d_out[0]) {
-            char *ei = json_escape_local(d_in);
-            char *eo = json_escape_local(d_out);
-            snprintf(out, cap,
-                     "{\"ok\":false,\"error\":\"время за этот день уже отмечено\","
-                     "\"date\":\"%s\",\"in\":\"%s\",\"out\":\"%s\"}",
-                     date, ei ? ei : "", eo ? eo : "");
-            free(ei); free(eo);
-            free(name);
-            return 409;
-        }
-        if (rd >= 0) {
-            /* ставка — из окружения: лист больше не первоисточник */
-            double rate = employee_rate_by_name(name);
-            double hours = (out_min - in_min) / 60.0;
-            if (hours < 0) hours += 24.0;
-            char hours_buf[32], sum_buf[32];
-            snprintf(hours_buf, sizeof(hours_buf), "%.2f", hours);
-            snprintf(sum_buf, sizeof(sum_buf), "%.2f", atof_comm(hours_buf) * rate);
+        /* ставка — из окружения: лист больше не первоисточник */
+        double rate = employee_rate_by_name(name);
+        double hours = (out_min - in_min) / 60.0;
+        if (hours < 0) hours += 24.0;
+        char hours_buf[32], sum_buf[32];
+        snprintf(hours_buf, sizeof(hours_buf), "%.2f", hours);
+        snprintf(sum_buf, sizeof(sum_buf), "%.2f", atof_comm(hours_buf) * rate);
 
-            if (sb_time_upsert(tab, day, norm_in, norm_out, hours_buf, sum_buf) >= 200) {
-                dirty_put(tab);                 /* выгрузка в Google — фоном */
-                trk_cache_invalidate(tab);      /* следующий days уйдёт в БД */
-                char *en = json_escape_local(name);
-                snprintf(out, cap,
-                         "{\"ok\":true,\"name\":\"%s\",\"month\":\"%s\",\"date\":\"%s\","
-                         "\"day\":%d,\"in\":\"%s\",\"out\":\"%s\","
-                         "\"hours\":\"%s\",\"sum\":\"%s\"}",
-                         en ? en : "", tab, date, day, norm_in, norm_out,
-                         hours_buf, sum_buf);
-                free(en);
-                trk_log("FILL(db): %s date=%s in=%s out=%s hours=%s sum=%s",
-                        name, date, norm_in, norm_out, hours_buf, sum_buf);
-                free(name);
-                return 200;
-            }
-            trk_log("fill: БД недоступна, фоллбэк Google (tab=%s day=%d)", tab, day);
-        } else {
-            trk_log("fill: ошибка чтения БД, фоллбэк Google (tab=%s day=%d)", tab, day);
+        /* UPSERT перезаписывает существующий день — это и есть правка
+           (409 «уже отмечено» убран: повторный submit — осознанное
+           редактирование, а не ошибка) */
+        int st = sb_time_upsert(tab, day, norm_in, norm_out, hours_buf, sum_buf);
+        if (st >= 200 && st < 300) {
+            dirty_put(tab);                 /* выгрузка в Google — фоном */
+            trk_cache_invalidate(tab);      /* следующий days уйдёт в БД */
+            char *en = json_escape_local(name);
+            snprintf(out, cap,
+                     "{\"ok\":true,\"name\":\"%s\",\"month\":\"%s\",\"date\":\"%s\","
+                     "\"day\":%d,\"in\":\"%s\",\"out\":\"%s\","
+                     "\"hours\":\"%s\",\"sum\":\"%s\"}",
+                     en ? en : "", tab, date, day, norm_in, norm_out,
+                     hours_buf, sum_buf);
+            free(en);
+            trk_log("FILL(db): %s date=%s in=%s out=%s hours=%s sum=%s",
+                    name, date, norm_in, norm_out, hours_buf, sum_buf);
+            free(name);
+            return 200;
         }
+        trk_log("fill: БД недоступна, фоллбэк Google (tab=%s day=%d)", tab, day);
         /* фоллбэк: недоступна БД — прежний путь через Google */
     }
 
@@ -2122,20 +2109,6 @@ int tracking_fill_day(const char *month, int day, const char *in_time,
 
     int block = find_employee_block(&rows, name);
     int row = (block >= 0) ? find_date_row(&rows, block, date) : -1;
-
-    if (row >= 0 &&
-        !cell_empty(rows.row[row].cell[1]) &&
-        !cell_empty(rows.row[row].cell[2])) {
-        char *ei = json_escape_local(rows.row[row].cell[1]);
-        char *eo = json_escape_local(rows.row[row].cell[2]);
-        snprintf(out, cap,
-                 "{\"ok\":false,\"error\":\"время за этот день уже отмечено\","
-                 "\"date\":\"%s\",\"in\":\"%s\",\"out\":\"%s\"}",
-                 date, ei ? ei : "", eo ? eo : "");
-        free(ei); free(eo);
-        code = 409;
-        goto fill_finish;
-    }
 
     if (row < 0) {
         if (block >= 0) {
@@ -2519,6 +2492,103 @@ static void api_tracking_fill(int fd, const char *query) {
     free(month); free(day_s); free(in_s); free(out_s);
 }
 
+/* POST /api/tracking/erase?month=...&day=N — УДАЛИТЬ отметку дня:
+   БД первично (DELETE + dirty-флаг: фон вычистит строку листа),
+   при недоступной БД — очистка строки листа напрямую. Дату (A) и
+   ставку (E) не трогаем — как в выгрузке. */
+static int tracking_erase_day(const char *month, int day, char *out, size_t cap) {
+    if (!out || cap < 128) return 500;
+    out[0] = '\0';
+    if (!month || !*month || day < 1) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"не указан месяц или день\"}");
+        return 400;
+    }
+    tracking_ensure_init();
+
+    char tab[64];
+    int pm = 0, py = 0;
+    if (month_sheet_and_parts(month, tab, sizeof(tab), &pm, &py) != 0) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный месяц\"}");
+        return 400;
+    }
+    if (day > days_in_month(pm, py)) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный день месяца\"}");
+        return 400;
+    }
+
+    const char *sn = getenv("SEARCH_NAME");
+    char *name = sn && *sn ? strdup(sn) : strdup("Сотрудник");
+    if (!name) { snprintf(out, cap, "{\"ok\":false,\"error\":\"нет имени\"}"); return 500; }
+
+    if (sb_enabled()) {
+        int st = sb_time_day_delete(tab, day);
+        if (st >= 200 && st < 300) {
+            dirty_put(tab);      /* фон вычистит строку листа этим же циклом */
+            trk_cache_invalidate(tab);
+            snprintf(out, cap, "{\"ok\":true,\"day\":%d,\"tab\":\"%s\"}", day, tab);
+            trk_log("ERASE(db): %s day=%d", tab, day);
+            free(name);
+            return 200;
+        }
+        trk_log("erase: БД недоступна (HTTP %d), фоллбэк Google", st);
+    }
+
+    /* Фоллбэк: очищаем строку дня в листе напрямую */
+    if (!g_sheet_id && tracking_ensure_spreadsheet() != 0) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"нет таблицы\"}");
+        free(name);
+        return 500;
+    }
+    TRows rows;
+    memset(&rows, 0, sizeof(rows));
+    if (load_or_create_month_sheet(tab, &rows) != 0) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"лист недоступен\"}");
+        free(name);
+        return 500;
+    }
+    int block = find_employee_block(&rows, name);
+    char date[32];
+    snprintf(date, sizeof(date), "%02d.%02d.%04d", day, pm, py);
+    int row = (block >= 0) ? find_date_row(&rows, block, date) : -1;
+    int rc = 200;
+    if (row >= 0) {
+        for (int c = 1; c <= 5; c++) {
+            if (c == 4) continue;        /* E — ставку храним */
+            free(rows.row[row].cell[c]);
+            rows.row[row].cell[c] = strdup("");
+        }
+        if (sheets_write_rows(tab, &rows) != 0) {
+            snprintf(out, cap, "{\"ok\":false,\"error\":\"ошибка записи в Google\"}");
+            rc = 500;
+        } else {
+            trk_cache_invalidate(tab);
+            trk_log("ERASE(google): %s day=%d", tab, day);
+        }
+    } else {
+        /* строки нет — удалять нечего */
+        trk_cache_invalidate(tab);
+    }
+    if (rc == 200)
+        snprintf(out, cap, "{\"ok\":true,\"day\":%d,\"tab\":\"%s\"}", day, tab);
+    trows_free(&rows);
+    free(name);
+    return rc;
+}
+
+static void api_tracking_erase(int fd, const char *query) {
+    char *month = query_param(query, "month");
+    char *day_s = query_param(query, "day");
+    int day = (day_s && *day_s) ? atoi(day_s) : 0;
+    char out[512];
+    int code = tracking_erase_day(month, day, out, sizeof(out));
+    const char *status = (code == 200) ? "200 OK"
+                       : (code == 400) ? "400 Bad Request"
+                       : "500 Internal Server Error";
+    trk_reply(fd, status, out);
+    free(month);
+    free(day_s);
+}
+
 /* GET /diag/tracking/ensure?month=Сентябрь 2026
    Создаёт отсутствующую вкладку месяца и пишет заголовки. */
 static void api_tracking_ensure(int fd, const char *query) {
@@ -2782,6 +2852,10 @@ void tracking_handle(int fd, const char *method, const char *path, const char *b
     }
     if (strncmp(path, "/api/tracking/fill", 18) == 0) {
         api_tracking_fill(fd, path);
+        return;
+    }
+    if (strncmp(path, "/api/tracking/erase", 19) == 0) {
+        api_tracking_erase(fd, path);
         return;
     }
     if (strncmp(path, "/api/tracking/summary", 20) == 0) {
