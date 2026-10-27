@@ -181,8 +181,10 @@ const char *sb_pending(const char *month, int *count) {
 
 /* ---------------- HTTP к Supabase ---------------- */
 
-/* method: "POST" | "DELETE" | "GET"; path — "/schedule?..." (без базы). */
-static int sb_call(const char *method, const char *path, const char *body) {
+/* method: "POST" | "PATCH" | "DELETE"; path — "/schedule?..." (без базы).
+   prefer — строка Prefer (NULL — значение по умолчанию). */
+static int sb_call_pref(const char *method, const char *path, const char *body,
+                        const char *prefer) {
     char url[1024];
     snprintf(url, sizeof(url), "%s%s", sb_base, path);
 
@@ -194,7 +196,9 @@ static int sb_call(const char *method, const char *path, const char *body) {
     int e = 0;
     extra[e++] = apikey;
     extra[e++] = auth;
-    if (!strcmp(method, "POST"))
+    if (prefer)
+        extra[e++] = prefer;
+    else if (!strcmp(method, "POST"))
         extra[e++] = "Prefer: resolution=merge-duplicates,return=minimal";
     else
         extra[e++] = "Prefer: return=minimal";
@@ -205,6 +209,10 @@ static int sb_call(const char *method, const char *path, const char *body) {
                                &status, NULL, 0);
     free(out);
     return status;
+}
+
+static int sb_call(const char *method, const char *path, const char *body) {
+    return sb_call_pref(method, path, body, NULL);
 }
 
 /* ---------------- flush ---------------- */
@@ -426,7 +434,8 @@ static void sb_epoch_iso(long long t, char *out, size_t cap) {
     strftime(out, cap, "%Y-%m-%dT%H:%M:%SZ", &tmv);
 }
 
-int sb_reminder_add(long long chat_id, long long remind_at, const char *text) {
+int sb_reminder_add_kind(long long chat_id, const char *kind, long long remind_at,
+                         const char *text) {
     if (!sb_on) return 0;
 
     char iso[32];
@@ -434,18 +443,27 @@ int sb_reminder_add(long long chat_id, long long remind_at, const char *text) {
 
     StrBuf sb;
     sbuf_init(&sb);
-    sbuf_appendf(&sb, "{\"chat_id\":%lld,\"remind_at\":\"%s\",\"text\":",
-                 chat_id, iso);
+    sbuf_appendf(&sb, "{\"chat_id\":%lld,\"kind\":", chat_id);
+    sbuf_append_json_string(&sb, (kind && *kind) ? kind : "once");
+    sbuf_appendf(&sb, ",\"remind_at\":\"%s\",\"text\":", iso);
     sbuf_append_json_string(&sb, text ? text : "");
     sbuf_append(&sb, "}");
     char *body = sbuf_take(&sb);
     if (!body) return 0;
 
-    int st = sb_call("POST", "/reminders", body);
+    /* ignore-duplicates: одно и то же напоминание (chat_id, kind, remind_at)
+       фоновый цикл пытается вставить каждый тик — дубль просто пропускается. */
+    int st = sb_call_pref("POST", "/reminders?on_conflict=chat_id,kind,remind_at",
+                          body,
+                          "Prefer: resolution=ignore-duplicates,return=minimal");
     free(body);
     if (st < 200 || st > 299)
         fprintf(stderr, "[remind] add -> HTTP %d (таблица reminders создана?)\n", st);
     return st;
+}
+
+int sb_reminder_add(long long chat_id, long long remind_at, const char *text) {
+    return sb_reminder_add_kind(chat_id, "once", remind_at, text);
 }
 
 int sb_reminder_due(long long now, SbReminder *out, int max) {
@@ -503,6 +521,55 @@ int sb_reminder_cancel(long long chat_id) {
     char path[160];
     snprintf(path, sizeof(path), "/reminders?chat_id=eq.%lld&sent=eq.false", chat_id);
     return sb_call("DELETE", path, NULL);
+}
+
+int sb_reminder_cancel_auto(long long chat_id) {
+    if (!sb_on) return 0;
+    char path[320];
+    snprintf(path, sizeof(path),
+             "/reminders?chat_id=eq.%lld&sent=eq.false"
+             "&or=(kind.eq.shift_start,kind.eq.shift_end)", chat_id);
+    return sb_call("DELETE", path, NULL);
+}
+
+/* ---------- подписка «напоминать по графику» ---------- */
+
+int sb_sub_set(long long chat_id, int enabled) {
+    if (!sb_on) return 0;
+    char body[96];
+    snprintf(body, sizeof(body), "{\"chat_id\":%lld,\"enabled\":%s}",
+             chat_id, enabled ? "true" : "false");
+    return sb_call("POST", "/reminder_subs?on_conflict=chat_id", body);
+}
+
+int sb_sub_enabled(long long *out, int max) {
+    if (!sb_on || !out || max <= 0) return 0;
+
+    char path[192];
+    snprintf(path, sizeof(path),
+             "/reminder_subs?select=chat_id&enabled=eq.true&limit=%d", max);
+
+    int status = 0;
+    char *resp = sb_get(path, &status);
+    if (!resp || status < 200 || status > 299) {
+        free(resp);
+        return 0;
+    }
+
+    cJSON *arr = cJSON_Parse(resp);
+    free(resp);
+    if (!cJSON_IsArray(arr)) { cJSON_Delete(arr); return 0; }
+
+    int n = 0;
+    cJSON *it = NULL;
+    cJSON_ArrayForEach(it, arr) {
+        if (n >= max) break;
+        cJSON *jcid = cJSON_GetObjectItemCaseSensitive(it, "chat_id");
+        if (!cJSON_IsNumber(jcid)) continue;
+        out[n++] = (long long)jcid->valuedouble;
+    }
+    cJSON_Delete(arr);
+    return n;
 }
 
 /* ================= Диагностика: /diag/supabase ================= */

@@ -40,6 +40,7 @@ static MonthSchedule month_with_shift(void) {
     snprintf(m.title, sizeof(m.title), "Октябрь 2026");
     row1[0] = "Бинкевич Татьяна Эдуардовна";
     row1[1] = "7:30-14:40";
+    row1[28] = "K2.1";          /* 27 октября (сегодня): индекс = day + 1 */
     row1[29] = "K2.1";          /* 28 октября: индекс дня = day + 1 */
     row1[33] = "6";
     row2[1] = "15:10-21:00";
@@ -116,6 +117,59 @@ int main(void) {
     rc = reminder_plan(now, 0, &m, 1, "xx", &p);
     ok(rc == 1 && strstr(p.reply, "Неизвестное") != NULL,
        "неизвестный выбор отклонён");
+
+    /* ================= напоминания по графику (сегодня) ================= */
+
+    ReminderSlot slots[REMINDER_SLOTS_MAX];
+
+    /* 27.10 06:00 — обе смены ещё впереди */
+    long long morning = epoch(2026, 10, 27, 6, 0);
+    int ns = reminder_day_slots(morning, 0, &m, 1, 15, 0, slots,
+                                REMINDER_SLOTS_MAX);
+    ok(ns == 2, "day: два напоминания (начало и конец)");
+    ok(ns == 2 && slots[0].at == epoch(2026, 10, 27, 7, 15),
+       "day: начало — за 15 мин (07:15)");
+    ok(ns == 2 && strcmp(slots[0].kind, "shift_start") == 0,
+       "day: вид первого — shift_start");
+    ok(ns == 2 && strstr(slots[0].text, "Пришла") != NULL,
+       "day: текст просит нажать «Пришла»");
+    ok(ns == 2 && strstr(slots[0].text, "15 мин") != NULL,
+       "day: в тексте «через 15 мин»");
+    ok(ns == 2 && slots[1].at == epoch(2026, 10, 27, 14, 40),
+       "day: конец — в 14:40");
+    ok(ns == 2 && strcmp(slots[1].kind, "shift_end") == 0,
+       "day: вид второго — shift_end");
+    ok(ns == 2 && strstr(slots[1].text, "Ушла") != NULL,
+       "day: текст просит нажать «Ушла»");
+
+    /* 27.10 07:20 — начало уже прошло, остаётся только конец */
+    ns = reminder_day_slots(epoch(2026, 10, 27, 7, 20), 0, &m, 1, 15, 0,
+                            slots, REMINDER_SLOTS_MAX);
+    ok(ns == 1 && slots[0].at == epoch(2026, 10, 27, 14, 40),
+       "day: прошедшее начало пропущено");
+
+    /* 27.10 15:00 — смена закончилась, напоминать не о чем */
+    ns = reminder_day_slots(epoch(2026, 10, 27, 15, 0), 0, &m, 1, 15, 0,
+                            slots, REMINDER_SLOTS_MAX);
+    ok(ns == 0, "day: после смены — пусто");
+
+    /* пояс UTC+3: 06:30 локально = 03:30 UTC */
+    ns = reminder_day_slots(epoch(2026, 10, 27, 3, 30), 3 * 3600, &m, 1, 15, 0,
+                            slots, REMINDER_SLOTS_MAX);
+    ok(ns == 2 && slots[0].at == epoch(2026, 10, 27, 4, 15),
+       "day tz+3: 07:15 локально = 04:15 UTC");
+
+    /* без графика — тихо ничего не планируем */
+    ns = reminder_day_slots(morning, 0, NULL, 0, 15, 0, slots,
+                            REMINDER_SLOTS_MAX);
+    ok(ns == 0, "day: нет кэша графика — пусто");
+
+    /* смена есть, но кабинета на сегодня нет */
+    MonthSchedule off = month_with_shift();
+    off.shift1 = row2; off.shift2 = row2;
+    ns = reminder_day_slots(morning, 0, &off, 1, 15, 0, slots,
+                            REMINDER_SLOTS_MAX);
+    ok(ns == 0, "day: сегодня смены нет — пусто");
 
     if (fails) printf("\nFAILURES: %d\n", fails);
     else printf("\nALL TESTS PASSED\n");

@@ -23,6 +23,24 @@ static int shift_start_minutes(const char *shift) {
     return time_parse(norm);
 }
 
+/* Конец смены в минутах от полуночи: "7:30-14:40" -> 880. */
+static int shift_end_minutes(const char *shift) {
+    if (!shift || !*shift) return -1;
+    const char *dash = strchr(shift, '-');
+    if (!dash) return -1;
+
+    char raw[16];
+    size_t n = 0;
+    for (const char *p = dash + 1; *p && n + 1 < sizeof(raw); p++) {
+        raw[n++] = *p;
+    }
+    raw[n] = '\0';
+
+    char norm[16];
+    time_normalize(raw, norm, sizeof(norm));
+    return time_parse(norm);
+}
+
 static const MonthSchedule *find_month(const MonthSchedule *months, int count,
                                         const char *title) {
     if (!months) return NULL;
@@ -31,7 +49,7 @@ static const MonthSchedule *find_month(const MonthSchedule *months, int count,
     return NULL;
 }
 
-/* Собирает текст о завтрашнем дне и заодно самое раннее начало смены.
+/* Собирает текст о дне и заодно самое раннее начало смены.
    *has_shift — 0/1; *start_min — минуты начала (только при *has_shift). */
 static void build_tomorrow_text(const MonthSchedule *m, int day,
                                 const char *date_label,
@@ -78,6 +96,58 @@ static void local_hhmm(long long local_epoch, char *out, size_t cap) {
     struct tm tmv;
     gmtime_r(&t, &tmv);
     snprintf(out, cap, "%02d:%02d", tmv.tm_hour, tmv.tm_min);
+}
+
+/* Смена на конкретный день: самая ранняя по началу строка с кабинетом. */
+typedef struct {
+    int  has;
+    int  start_min;              /* минуты от полуночи */
+    int  end_min;
+    char shift[32];
+    char cabinet[64];
+} DayShift;
+
+static void day_shift(const MonthSchedule *m, int day, DayShift *ds) {
+    memset(ds, 0, sizeof(*ds));
+    ds->start_min = -1;
+    ds->end_min = -1;
+    if (!m) return;
+
+    for (int row = 0; row < 2; row++) {
+        const char *cab = month_schedule_cell(m, row, day + 1);
+        if (!cab || !*cab) continue;
+        const char *sh = month_schedule_cell(m, row, 1);
+        int st = shift_start_minutes(sh);
+        int en = shift_end_minutes(sh);
+
+        if (st >= 0 && (ds->start_min < 0 || st < ds->start_min)) {
+            ds->start_min = st;
+            snprintf(ds->shift, sizeof(ds->shift), "%s", sh ? sh : "");
+            snprintf(ds->cabinet, sizeof(ds->cabinet), "%s", cab);
+        }
+        if (en >= 0 && en > ds->end_min) ds->end_min = en;
+        ds->has = 1;
+    }
+}
+
+/* Локальные «сейчас», сегодняшняя дата и лист месяца на этот день. */
+static const MonthSchedule *today_context(long long now, int tz_offset,
+                                          const MonthSchedule *months, int count,
+                                          long long *midnight, int *day_out) {
+    long long local_now = now + tz_offset;
+    long long mid = local_now - (local_now % 86400);
+    if (midnight) *midnight = mid;
+
+    time_t t = (time_t)mid;
+    struct tm tmv;
+    gmtime_r(&t, &tmv);
+    int day = tmv.tm_mday, mon = tmv.tm_mon + 1, year = tmv.tm_year + 1900;
+    if (day_out) *day_out = day;
+
+    char title[SCHEDULE_MAX_NAME];
+    const char *mname = month_name(mon);
+    snprintf(title, sizeof(title), "%s %d", mname ? mname : "", year);
+    return find_month(months, count, title);
 }
 
 int reminder_plan(long long now, int tz_offset,
@@ -165,4 +235,66 @@ int reminder_plan(long long now, int tz_offset,
         snprintf(plan->reply, sizeof(plan->reply),
                  "Ок! Напомню завтра в %s.\n%s", plan->when, text);
     return 0;
+}
+
+int reminder_day_slots(long long now, int tz_offset,
+                       const MonthSchedule *months, int count,
+                       int start_lead, int end_lead,
+                       ReminderSlot *out, int max) {
+    if (!out || max <= 0) return -1;
+    if (start_lead < 0) start_lead = 0;
+    if (end_lead < 0) end_lead = 0;
+
+    long long midnight = 0;
+    int day = 0;
+    const MonthSchedule *m = today_context(now, tz_offset, months, count,
+                                           &midnight, &day);
+    if (!m) return 0;
+
+    DayShift ds;
+    day_shift(m, day, &ds);
+    if (!ds.has || ds.start_min < 0 || ds.end_min < 0) return 0;
+
+    char hhmm_start[8], hhmm_end[8];
+    local_hhmm(midnight + (long long)ds.start_min * 60, hhmm_start,
+               sizeof(hhmm_start));
+    local_hhmm(midnight + (long long)ds.end_min * 60, hhmm_end,
+               sizeof(hhmm_end));
+
+    int n = 0;
+    long long at_start = midnight + (long long)(ds.start_min - start_lead) * 60;
+    long long at_end = midnight + (long long)(ds.end_min - end_lead) * 60;
+
+    if (at_start > now + 30 && n < max) {
+        out[n].at = at_start - tz_offset;
+        snprintf(out[n].kind, sizeof(out[n].kind), "shift_start");
+        if (start_lead > 0)
+            snprintf(out[n].text, sizeof(out[n].text),
+                     "Через %d мин начало смены: %s–%s, кабинет %s.\n"
+                     "Отметьте приход кнопкой «Пришла».",
+                     start_lead, hhmm_start, hhmm_end, ds.cabinet);
+        else
+            snprintf(out[n].text, sizeof(out[n].text),
+                     "Смена начинается в %s (кабинет %s).\n"
+                     "Отметьте приход кнопкой «Пришла».",
+                     hhmm_start, ds.cabinet);
+        n++;
+    }
+
+    if (at_end > now + 30 && n < max) {
+        out[n].at = at_end - tz_offset;
+        snprintf(out[n].kind, sizeof(out[n].kind), "shift_end");
+        if (end_lead > 0)
+            snprintf(out[n].text, sizeof(out[n].text),
+                     "Смена заканчивается в %s — через %d мин.\n"
+                     "Отметьте уход кнопкой «Ушла».",
+                     hhmm_end, end_lead);
+        else
+            snprintf(out[n].text, sizeof(out[n].text),
+                     "Смена закончилась в %s.\n"
+                     "Отметьте уход кнопкой «Ушла».", hhmm_end);
+        n++;
+    }
+
+    return n;
 }

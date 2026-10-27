@@ -17,19 +17,21 @@
 /* Инлайн-клавиатура учёта времени. */
 #define TRACK_INLINE_JSON "{\"inline_keyboard\":[[{\"text\":\"Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"Ушла\",\"callback_data\":\"trk_out\"}]]}"
 
-/* Выбор времени напоминания о завтрашней смене. */
+/* Выбор напоминания: разово на завтра или каждый день по графику. */
 #define REMIND_INLINE_JSON "{\"inline_keyboard\":[" \
     "[{\"text\":\"08:00\",\"callback_data\":\"rm:08\"}," \
     "{\"text\":\"09:00\",\"callback_data\":\"rm:09\"}," \
     "{\"text\":\"20:00\",\"callback_data\":\"rm:20\"}]," \
     "[{\"text\":\"За час до смены\",\"callback_data\":\"rm:shift\"}]," \
-    "[{\"text\":\"Отменить напоминания\",\"callback_data\":\"rm:off\"}]]}"
+    "[{\"text\":\"Начало и конец смены (по графику)\",\"callback_data\":\"rm:daily_on\"}]," \
+    "[{\"text\":\"Выключить по графику\",\"callback_data\":\"rm:daily_off\"}," \
+    "{\"text\":\"Отменить всё\",\"callback_data\":\"rm:off\"}]]}"
 
 static const char HELP_MSG[] =
     "Привет! Я бот-график смен.\n\n"
     "График — кнопка меню чата\n"
     "Отметить время — кнопки внизу\n"
-    "Напомнить — сообщение о смене завтра";
+    "Напомнить — смена завтра или каждый день по графику";
 
 void bot_service_init(BotService *bot, const AppConfig *cfg,
                        TrackingService *tracking) {
@@ -231,7 +233,16 @@ void bot_process_update(BotService *bot, const char *body) {
             /* Напоминание о завтрашней смене */
             if (strncmp(data, "rm:", 3) == 0) {
                 const char *choice = data + 3;
-                if (strcmp(choice, "off") == 0) {
+                if (strcmp(choice, "daily_on") == 0 ||
+                    strcmp(choice, "daily_off") == 0) {
+                    int on = (strcmp(choice, "daily_on") == 0);
+                    char reply[256];
+                    int rc = reminder_daily_set(cid, on, reply, sizeof(reply));
+                    if (cqid)
+                        telegram_answer_callback(bot->cfg->bot_token, cqid,
+                                                 rc == 0 ? "Готово" : "Ошибка");
+                    send_text_kb(bot, cid, reply);
+                } else if (strcmp(choice, "off") == 0) {
                     int rc = reminder_cancel(cid);
                     if (cqid)
                         telegram_answer_callback(bot->cfg->bot_token, cqid,

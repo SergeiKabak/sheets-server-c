@@ -84,8 +84,11 @@ typedef struct {
 } SbReminder;
 
 /* Добавляет напоминание на момент remind_at (UTC, секунды с эпохи).
+   kind: "once" | "shift_start" | "shift_end" (для авто-напоминаний).
    Возвращает HTTP-код (2xx — успех), 0 — выключено/сетевая ошибка. */
 int sb_reminder_add(long long chat_id, long long remind_at, const char *text);
+int sb_reminder_add_kind(long long chat_id, const char *kind, long long remind_at,
+                         const char *text);
 
 /* Забирает созревшие (remind_at <= now, sent=false) напоминания.
    Возвращает число записей (0 — нет или ошибка). */
@@ -97,6 +100,18 @@ int sb_reminder_mark_sent(long long id);
 /* Удаляет неотправленные напоминания чата (кнопка «Отменить»).
    HTTP-код, 0 — выключено/ошибка. */
 int sb_reminder_cancel(long long chat_id);
+
+/* Удаляет неотправленные авто-напоминания (начало/конец смены). */
+int sb_reminder_cancel_auto(long long chat_id);
+
+/* ---------- подписка «напоминать по графику» ---------- */
+
+/* Включает/выключает ежедневные напоминания чата. HTTP-код, 0 — выключено. */
+int sb_sub_set(long long chat_id, int enabled);
+
+/* Заполняет out идентификаторами чатов с включённым режимом.
+   Возвращает число чатов (0 — нет или ошибка). */
+int sb_sub_enabled(long long *out, int max);
 
 /* Диагностика для GET /diag/supabase (ручной мониторинг между этапами):
    точные счётчики schedule (всего/валидных/служебных), построчно по месяцам,

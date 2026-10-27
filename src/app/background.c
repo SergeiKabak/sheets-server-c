@@ -113,6 +113,13 @@ void background_run(AppContext *app) {
             }
         }
 
+        /* Напоминания по графику: раскладываем сегодняшние (начало/конец
+           смены) для подписанных чатов, пока кэш месяцев ещё в памяти. */
+        if (c > 0) {
+            int mat = reminders_materialize(&app->cfg, &app->tracking, months, c);
+            if (mat > 0) fprintf(stderr, "[remind] planned: %d\n", mat);
+        }
+
         month_schedules_free(months, c);
 
         /* Напоминания бота: отправляем созревшие (раз в минуту). */
