@@ -170,7 +170,7 @@ int reminder_plan(long long now, int tz_offset,
     int mon = tmrw.tm_mon + 1;
     int year = tmrw.tm_year + 1900;
 
-    char date_label[16];
+    char date_label[40];
     snprintf(date_label, sizeof(date_label), "%02d.%02d.%04d", day, mon, year);
 
     const char *mname = month_name(mon);

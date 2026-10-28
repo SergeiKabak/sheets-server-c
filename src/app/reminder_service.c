@@ -28,7 +28,7 @@ static int mark_missing(const TrackingService *svc, long long remind_at,
     struct tm tmv;
     gmtime_r(&t, &tmv);
 
-    char tab[16];
+    char tab[32];
     snprintf(tab, sizeof(tab), "%02d.%04d", tmv.tm_mon + 1, tmv.tm_year + 1900);
 
     char t_in[16] = "", t_out[16] = "";
