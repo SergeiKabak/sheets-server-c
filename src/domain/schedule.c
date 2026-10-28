@@ -51,6 +51,31 @@ const char *month_schedule_cell(const MonthSchedule *m, int row, int col) {
     return cells[col];
 }
 
+int month_schedule_init_stub(MonthSchedule *m, const char *title, int cols,
+                             const char *total) {
+    if (!m || !title || !*title || cols < 4 || cols > 64) return -1;
+    memset(m, 0, sizeof(*m));
+    snprintf(m->title, sizeof(m->title), "%.*s", SCHEDULE_MAX_NAME - 1, title);
+
+    for (int row = 0; row < 2; row++) {
+        char **cells = malloc(sizeof(char *) * (size_t)cols);
+        if (!cells) { month_schedule_free(m); return -1; }
+        for (int i = 0; i < cols; i++) {
+            const char *v = (row == 0 && i == cols - 1 && total) ? total : "";
+            cells[i] = strdup(v);
+            if (!cells[i]) {
+                for (int k = 0; k < i; k++) free(cells[k]);
+                free(cells);
+                month_schedule_free(m);
+                return -1;
+            }
+        }
+        if (row == 0) { m->shift1 = cells; m->shift1_len = cols; }
+        else          { m->shift2 = cells; m->shift2_len = cols; }
+    }
+    return 0;
+}
+
 /* ---------- строки месяца из БД ---------- */
 
 #define SCHEDULE_MAX_SHIFTS 8   /* смен у сотрудника в месяце (Mini App показывает 2) */

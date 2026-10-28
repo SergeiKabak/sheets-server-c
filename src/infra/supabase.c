@@ -657,6 +657,117 @@ int sb_sub_list(SbSub *out, int max) {
     return n;
 }
 
+/* ---------- структура листа месяца (month_meta) ---------- */
+
+int sb_month_meta_flush(const SbMonthMeta *list, int n) {
+    if (!sb_on || !list || n <= 0) return 0;
+
+    char now_iso[40];
+    sb_now_iso(now_iso, sizeof(now_iso));
+
+    StrBuf sb;
+    sbuf_init(&sb);
+    sbuf_append(&sb, "[");
+    int added = 0;
+    for (int i = 0; i < n; i++) {
+        if (!list[i].month[0] || list[i].cols < 4) continue;
+        if (added) sbuf_append(&sb, ",");
+        sbuf_append(&sb, "{\"month\":");
+        sbuf_append_json_string(&sb, list[i].month);
+        sbuf_appendf(&sb, ",\"cols\":%d,\"total_shifts\":", list[i].cols);
+        sbuf_append_json_string(&sb, list[i].total_shifts);
+        sbuf_appendf(&sb, ",\"updated_at\":\"%s\"}", now_iso);
+        added++;
+    }
+    sbuf_append(&sb, "]");
+
+    char *body = sbuf_take(&sb);
+    if (!body) return 0;
+    int st = 0;
+    if (added > 0)
+        st = sb_call("POST", "/month_meta?on_conflict=month", body);
+    free(body);
+    return st;
+}
+
+/* Общий разбор ответа month_meta: массив -> SbMonthMeta. */
+static int sb_month_meta_parse(char *resp, int status, SbMonthMeta *out, int max) {
+    if (!resp || status < 200 || status > 299) {
+        free(resp);
+        return -1;
+    }
+    cJSON *arr = cJSON_Parse(resp);
+    free(resp);
+    if (!cJSON_IsArray(arr)) { cJSON_Delete(arr); return -1; }
+
+    int n = 0;
+    cJSON *it = NULL;
+    cJSON_ArrayForEach(it, arr) {
+        if (n >= max) break;
+        cJSON *jm = cJSON_GetObjectItemCaseSensitive(it, "month");
+        cJSON *jc = cJSON_GetObjectItemCaseSensitive(it, "cols");
+        cJSON *jt = cJSON_GetObjectItemCaseSensitive(it, "total_shifts");
+        if (!cJSON_IsString(jm) || !jm->valuestring || !*jm->valuestring) continue;
+        if (!cJSON_IsNumber(jc)) continue;
+        memset(&out[n], 0, sizeof(out[n]));
+        snprintf(out[n].month, sizeof(out[n].month), "%s", jm->valuestring);
+        out[n].cols = (int)jc->valuedouble;
+        if (cJSON_IsString(jt) && jt->valuestring)
+            snprintf(out[n].total_shifts, sizeof(out[n].total_shifts), "%s",
+                     jt->valuestring);
+        n++;
+    }
+    cJSON_Delete(arr);
+    return n;
+}
+
+int sb_month_meta_get(const char *month, SbMonthMeta *out) {
+    if (!sb_on || !month || !*month || !out) return -1;
+
+    char *em = url_encode(month);
+    if (!em) return -1;
+    char path[512];
+    snprintf(path, sizeof(path),
+             "/month_meta?select=month,cols,total_shifts&month=eq.%s&limit=1", em);
+    free(em);
+
+    int status = 0;
+    char *resp = sb_get(path, &status);
+    int n = sb_month_meta_parse(resp, status, out, 1);
+    if (n < 0) return -1;
+    return n > 0 ? 0 : 1;
+}
+
+/* "10.2026" -> 2026*12+10: порядок месяцев в списке (строкой '01.2027'
+   сортировался бы раньше '12.2026'). 0 — строка не разобрана. */
+static int sb_month_key(const char *m) {
+    int mm = 0, yy = 0;
+    if (!m || sscanf(m, "%d.%d", &mm, &yy) != 2) return 0;
+    if (mm < 1 || mm > 12 || yy < 1970) return 0;
+    return yy * 12 + (mm - 1);
+}
+
+static int sb_month_cmp(const void *a, const void *b) {
+    const SbMonthMeta *x = (const SbMonthMeta *)a;
+    const SbMonthMeta *y = (const SbMonthMeta *)b;
+    return sb_month_key(x->month) - sb_month_key(y->month);
+}
+
+int sb_month_meta_list(SbMonthMeta *out, int max) {
+    if (!sb_on || !out || max <= 0) return 0;
+
+    char path[256];
+    snprintf(path, sizeof(path),
+             "/month_meta?select=month,cols,total_shifts&limit=%d", max);
+
+    int status = 0;
+    char *resp = sb_get(path, &status);
+    int n = sb_month_meta_parse(resp, status, out, max);
+    if (n <= 0) return 0;
+    qsort(out, (size_t)n, sizeof(out[0]), sb_month_cmp);
+    return n;
+}
+
 /* ================= Диагностика: /diag/supabase ================= */
 
 /* Точный счётчик строк PostgREST: GET ...&limit=0 с Prefer: count=exact —

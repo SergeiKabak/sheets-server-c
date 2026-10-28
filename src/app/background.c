@@ -12,6 +12,11 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Как часто перечитываем листы графика из Google. Люди правят график редко,
+ * а каждый обход — это запрос метаданных + запрос на каждый лист (4-5
+ * запросов). Между обходами живём на /tmp/months.dat и таблице schedule. */
+#define SCHEDULE_GOOGLE_TTL 300
+
 /* ================================================================
  *  Этап 1 плана Supabase: строки самого сотрудника в буфер
  * ================================================================ */
@@ -45,34 +50,58 @@ static void sb_add_month_rows(const MonthSchedule *m, const char *fallback_name)
 void background_run(AppContext *app) {
     if (!app) return;
     MonthSchedule months[SCHEDULE_MAX_MONTHS];
+    time_t last_google = 0;   /* когда последний раз читали листы Google */
 
     for (;;) {
         memset(months, 0, sizeof(months));
-        sb_begin_cycle();   /* updated_at текущего цикла — ДО сбора строк */
+        int c = 0;
 
-        FILE *idx = fopen(cabinet_index_path(), "w");
-        int c = schedule_build_months(&app->cfg, months, SCHEDULE_MAX_MONTHS, idx);
-        if (idx) { fclose(idx); fprintf(stderr, "[cabinet] index saved\n"); }
-        month_cache_save(months, c);
-        fprintf(stderr, "[updater] months cached: %d\n", c);
+        /* График из Google читаем не каждый тик, а раз в SCHEDULE_GOOGLE_TTL:
+           листы правят люди, а нам важнее не жечь квоту Google (1 запрос
+           метаданных + по одному на лист). Между чтениями живём на кэше. */
+        if (time(NULL) - last_google >= SCHEDULE_GOOGLE_TTL) {
+            last_google = time(NULL);
+            sb_begin_cycle();   /* updated_at текущего цикла — ДО сбора строк */
 
-        /* Буфер графика в Supabase: upsert строк месяца + уборка устаревших */
-        if (sb_enabled()) {
-            const char *titles[SCHEDULE_MAX_MONTHS];
-            int nt = 0;
-            for (int i = 0; i < c && nt < SCHEDULE_MAX_MONTHS; i++) {
-                titles[nt++] = months[i].title;
-                sb_add_month_rows(&months[i], app->cfg.search_name);
+            FILE *idx = fopen(cabinet_index_path(), "w");
+            c = schedule_build_months(&app->cfg, months, SCHEDULE_MAX_MONTHS, idx);
+            if (idx) { fclose(idx); fprintf(stderr, "[cabinet] index saved\n"); }
+            month_cache_save(months, c);
+            fprintf(stderr, "[updater] months from google: %d\n", c);
+
+            /* «Форма» месяцев (ширина строки + счётчик) — в БД: без неё
+               календарь не построить, когда /tmp пуст, а Google молчит. */
+            if (sb_enabled() && c > 0)
+                schedule_month_meta_flush(months, c);
+
+            /* Буфер графика в Supabase: upsert строк месяца + уборка устаревших */
+            if (sb_enabled()) {
+                const char *titles[SCHEDULE_MAX_MONTHS];
+                int nt = 0;
+                for (int i = 0; i < c && nt < SCHEDULE_MAX_MONTHS; i++) {
+                    titles[nt++] = months[i].title;
+                    sb_add_month_rows(&months[i], app->cfg.search_name);
+                }
+                int errs = 0;
+                int rows = sb_flush(titles, nt, &errs);
+                fprintf(stderr, "[sync] supabase schedule: rows=%d errors=%d\n", rows, errs);
+                static int cycle = 0;
+                cycle++;
+                /* пульс в sync_log каждые ~10 циклов + любая ошибка отдельно */
+                if (errs || cycle % 10 == 0)
+                    sb_log("schedule", "", rows, errs == 0,
+                           errs ? "HTTP error при синхронизации графика" : "");
             }
-            int errs = 0;
-            int rows = sb_flush(titles, nt, &errs);
-            fprintf(stderr, "[sync] supabase schedule: rows=%d errors=%d\n", rows, errs);
-            static int cycle = 0;
-            cycle++;
-            /* пульс в sync_log каждые ~10 мин + любая ошибка отдельно */
-            if (errs || cycle % 10 == 0)
-                sb_log("schedule", "", rows, errs == 0,
-                       errs ? "HTTP error при синхронизации графика" : "");
+        } else {
+            c = month_cache_load(months, SCHEDULE_MAX_MONTHS);
+        }
+
+        /* Ни файлового кэша, ни ответа Google (свежий контейнер / сбой
+           квоты) — структура месяцев из БД: календарь, напоминания и
+           отметки продолжают работать. */
+        if (c <= 0) {
+            c = schedule_months_from_db(months, SCHEDULE_MAX_MONTHS);
+            if (c > 0) fprintf(stderr, "[updater] months from db: %d\n", c);
         }
 
         /* Тот же цикл обновляет и кэш отметок Time tracking, чтобы Mini App

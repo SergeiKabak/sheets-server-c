@@ -263,6 +263,24 @@ static void test_schedule_domain(void) {
     check(!strcmp(json, "[{\"name\":\"А\",\"shift\":\"7:30-14:40\"},"
                         "{\"name\":\"А\",\"shift\":\"15:10-21:00\"}]"),
           "colleagues: формат JSON");
+
+    /* месяц-заглушка по структуре листа (month_meta): без самого листа
+       календарь должен знать ширину строки и счётчик «Всего смен» */
+    MonthSchedule stub;
+    check(month_schedule_init_stub(&stub, "Октябрь 2026", 34, "41") == 0,
+          "stub: месяц из структуры листа");
+    check(stub.shift1_len == 34 && stub.shift2_len == 34, "stub: ширина строк 34");
+    check(month_schedule_width(&stub) == 34, "stub: ширина месяца 34");
+    check(!strcmp(month_schedule_cell(&stub, 0, 33), "41"), "stub: счётчик в конце");
+    check(!strcmp(month_schedule_cell(&stub, 0, 0), ""), "stub: дни пустые");
+    check(!strcmp(month_schedule_cell(&stub, 1, 33), ""), "stub: в вечерней строке пусто");
+    check(!strcmp(stub.title, "Октябрь 2026"), "stub: заголовок месяца");
+    month_schedule_free(&stub);
+
+    check(month_schedule_init_stub(&stub, "X", 3, "1") == -1,
+          "stub: слишком узкая строка отклонена");
+    check(month_schedule_init_stub(&stub, "", 34, "1") == -1,
+          "stub: пустой заголовок отклонён");
 }
 
 int main(void) {

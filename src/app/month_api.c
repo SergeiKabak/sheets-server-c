@@ -43,9 +43,11 @@ static int build_month_arrays_json(const MonthSchedule *m,
 }
 
 /* Массивы s1/s2 месяца: БД (этап 2), при недоступности — файловый кэш.
+ * db_only — месяц собран из month_meta (файлового кэша нет): подставлять
+ * пустые ячейки вместо данных нельзя, поэтому ошибка БД = ошибка ответа.
  * 0 — успех (структура листа: n = max(длин строк), дней = n-3,
  * счётчик «Всего смен» — из листа). */
-static int month_s1s2(const AppConfig *cfg, const MonthSchedule *m,
+static int month_s1s2(const AppConfig *cfg, const MonthSchedule *m, int db_only,
                       char *s1, size_t s1cap, char *s2, size_t s2cap) {
     int c1 = m->shift1_len, c2 = m->shift2_len;
     int n = c1 > c2 ? c1 : c2;
@@ -58,6 +60,7 @@ static int month_s1s2(const AppConfig *cfg, const MonthSchedule *m,
         schedule_read_month_from_db(m->title, cfg->search_name, n - 3, total1,
                                     s1, s1cap, s2, s2cap) == 0)
         return 0;
+    if (db_only) return -1;
     return build_month_arrays_json(m, s1, s1cap, s2, s2cap);
 }
 
@@ -68,6 +71,12 @@ int month_api_months_json(const AppConfig *cfg, char *out, size_t cap) {
     MonthSchedule months[SCHEDULE_MAX_MONTHS];
     memset(months, 0, sizeof(months));
     int count = month_cache_load(months, SCHEDULE_MAX_MONTHS);
+    if (count == 0) {
+        /* /tmp пуст (рестарт контейнера) — список месяцев из БД */
+        count = schedule_months_from_db(months, SCHEDULE_MAX_MONTHS);
+        if (count > 0)
+            fprintf(stderr, "[cache] months <- db: %d\n", count);
+    }
 
     StrBuf sb;
     sbuf_init(&sb);
@@ -105,14 +114,24 @@ int month_api_month_json(TrackingService *svc, const char *query,
     for (int i = 0; i < count; i++) {
         if (strcmp(months[i].title, name) == 0) { idx = i; break; }
     }
+
+    /* Файлового кэша нет (рестарт контейнера, Google ещё не ответил) —
+       «форму» месяца берём из БД, строки всё равно читаются оттуда же. */
+    MonthSchedule db_month;
+    int have_db = 0;
+    if (idx < 0 && count == 0 && schedule_month_from_db(name, &db_month) == 0) {
+        have_db = 1;
+        fprintf(stderr, "[cache] month '%s' <- db (нет файлового кэша)\n", name);
+    }
+
     free(name);
-    if (idx < 0) {
+    if (idx < 0 && !have_db) {
         month_schedules_free(months, count);
         snprintf(out, cap, "{\"error\":\"не найдено\"}");
         return 404;
     }
 
-    MonthSchedule *m = &months[idx];
+    MonthSchedule *m = have_db ? &db_month : &months[idx];
 
     /* Отметки Time tracking — из своего кэша (обновляется фоновым циклом,
        инвалидируется при записи — поэтому их НЕ кэшируем в mresp) */
@@ -126,8 +145,10 @@ int month_api_month_json(TrackingService *svc, const char *query,
     char s2txt[16384] = "";
     int use_cache = (month_response_read(m->title, cached, sizeof(cached)) == 0);
     if (!use_cache) {
-        if (month_s1s2(svc->cfg, m, s1txt, sizeof(s1txt), s2txt, sizeof(s2txt)) != 0) {
+        if (month_s1s2(svc->cfg, m, have_db, s1txt, sizeof(s1txt),
+                       s2txt, sizeof(s2txt)) != 0) {
             month_schedules_free(months, count);
+            if (have_db) month_schedule_free(&db_month);
             snprintf(out, cap, "{\"error\":\"нет данных месяца\"}");
             return 500;
         }
@@ -159,6 +180,7 @@ int month_api_month_json(TrackingService *svc, const char *query,
 
     char *json = sbuf_take(&sb);
     month_schedules_free(months, count);
+    if (have_db) month_schedule_free(&db_month);
     if (!json) { snprintf(out, cap, "{}"); return 500; }
     if (strlen(json) >= cap) { free(json); snprintf(out, cap, "{}"); return 500; }
     memcpy(out, json, strlen(json) + 1);

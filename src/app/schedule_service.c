@@ -358,6 +358,49 @@ int schedule_read_colleagues_from_db(const char *month, int day, const char *cab
     return rc;
 }
 
+/* ---------- структура месяцев в БД (month_meta) ---------- */
+
+int schedule_month_meta_flush(const MonthSchedule *months, int count) {
+    if (!months || count <= 0 || !sb_enabled()) return 0;
+
+    SbMonthMeta meta[SCHEDULE_MAX_MONTHS];
+    int n = 0;
+    for (int i = 0; i < count && n < SCHEDULE_MAX_MONTHS; i++) {
+        if (!months[i].title[0]) continue;
+        int cols = month_schedule_width(&months[i]);
+        if (cols < 4) continue;
+        memset(&meta[n], 0, sizeof(meta[n]));
+        snprintf(meta[n].month, sizeof(meta[n].month), "%s", months[i].title);
+        meta[n].cols = cols;
+        snprintf(meta[n].total_shifts, sizeof(meta[n].total_shifts), "%s",
+                 month_schedule_cell(&months[i], 0, cols - 1));
+        n++;
+    }
+    return sb_month_meta_flush(meta, n);
+}
+
+int schedule_month_from_db(const char *title, MonthSchedule *m) {
+    if (!title || !*title || !m) return -1;
+    SbMonthMeta meta;
+    if (sb_month_meta_get(title, &meta) != 0) return -1;
+    return month_schedule_init_stub(m, meta.month, meta.cols, meta.total_shifts);
+}
+
+int schedule_months_from_db(MonthSchedule *out, int max) {
+    if (!out || max <= 0) return 0;
+
+    SbMonthMeta meta[SCHEDULE_MAX_MONTHS];
+    int lim = max < SCHEDULE_MAX_MONTHS ? max : SCHEDULE_MAX_MONTHS;
+    int n = sb_month_meta_list(meta, lim);
+    int got = 0;
+    for (int i = 0; i < n && got < max; i++) {
+        if (month_schedule_init_stub(&out[got], meta[i].month, meta[i].cols,
+                                     meta[i].total_shifts) == 0)
+            got++;
+    }
+    return got;
+}
+
 /* ---------- обновление кэша строк месяца ---------- */
 
 int schedule_refresh_colleagues_cache(const char *title) {

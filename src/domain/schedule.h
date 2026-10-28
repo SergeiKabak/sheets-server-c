@@ -40,6 +40,13 @@ int   month_schedule_width(const MonthSchedule *m);
 /* Ячейка строки листа: row 0 — утро, row 1 — вечер. */
 const char *month_schedule_cell(const MonthSchedule *m, int row, int col);
 
+/* Месяц-заглушка по структуре листа (ширина строки cols, счётчик «Всего
+ * смен» — в последней ячейке утренней строки). Нужен, когда самого листа
+ * нет под рукой: на холодном старте календарь строится из БД, а длину
+ * строки и счётчик даёт таблица month_meta. Возвращает 0 или -1. */
+int   month_schedule_init_stub(MonthSchedule *m, const char *title, int cols,
+                               const char *total);
+
 /* ---------- строки месяца из БД ---------- */
 
 /* Строит JSON-массивы s1/s2 месяца Mini App из строк БД (PostgREST).

@@ -20,6 +20,16 @@ create table if not exists schedule (
 create index if not exists schedule_cab_idx on schedule (month, day, cabinet);
 create index if not exists schedule_emp_idx on schedule (month, employee, day);
 
+-- «Форма» месяца: ширина строки листа и счётчик «Всего смен».
+-- Нужна на холодном старте (пустой /tmp) и при недоступном Google, чтобы
+-- календарь строился из schedule без чтения листов.
+create table if not exists month_meta (
+  month        text primary key,              -- '10.2026'
+  cols         int  not null default 34,      -- ширина строки: дни + 3
+  total_shifts text not null default '',      -- значение счётчика из листа
+  updated_at   timestamptz not null default now()
+);
+
 -- Журнал синхронизации: «пульс» каждые ~10 минут + ошибки
 create table if not exists sync_log (
   id         bigint generated always as identity primary key,
@@ -48,5 +58,6 @@ create table if not exists time_entries (
 -- RLS: закрыть всё, кроме service_role (он обходит RLS).
 -- Анонимный ключ из Mini App в коде не используется и доступа не получит.
 alter table schedule     enable row level security;
+alter table month_meta   enable row level security;
 alter table sync_log     enable row level security;
 alter table time_entries enable row level security;

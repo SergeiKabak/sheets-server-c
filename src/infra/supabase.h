@@ -126,6 +126,27 @@ int sb_sub_get(long long chat_id, int *enabled, int *start_lead_min,
    Возвращает число чатов (0 — нет или ошибка). */
 int sb_sub_list(SbSub *out, int max);
 
+/* ---------- структура листа месяца (month_meta) ---------- */
+
+/* Ширина строки листа (дни + 3 служебные колонки) и счётчик «Всего смен».
+   Нужна, чтобы построить месяц без Google: на холодном старте /tmp пуст,
+   а календарю всё равно нужны длина строки и значение счётчика. */
+typedef struct {
+    char month[32];
+    int  cols;
+    char total_shifts[32];
+} SbMonthMeta;
+
+/* Upsert структуры месяцев одним запросом (пишет фоновый цикл).
+   HTTP-код, 0 — выключено. */
+int sb_month_meta_flush(const SbMonthMeta *list, int n);
+
+/* Структура одного месяца. 0 — найдена, 1 — записи нет, -1 — ошибка. */
+int sb_month_meta_get(const char *month, SbMonthMeta *out);
+
+/* Все месяцы структуры, по возрастанию названия. Возвращает число (0 — нет). */
+int sb_month_meta_list(SbMonthMeta *out, int max);
+
 /* Диагностика для GET /diag/supabase (ручной мониторинг между этапами):
    точные счётчики schedule (всего/валидных/служебных), построчно по месяцам,
    time_entries, последняя запись и последний restore из sync_log с возрастом

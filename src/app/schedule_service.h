@@ -59,6 +59,22 @@ int schedule_read_colleagues_from_db(const char *month, int day, const char *cab
  * Возвращает 0 при успехе, -1 при ошибке. */
 int schedule_refresh_colleagues_cache(const char *title);
 
+/* ---------- структура месяцев в БД (month_meta) ----------
+ * Google-лист нужен не только ради строк, но и ради «формы» месяца: ширины
+ * строки (дни + 3 служебные колонки) и счётчика «Всего смен». Эти два числа
+ * кэшируются в month_meta, чтобы холодный старт (пустой /tmp) и недоступный
+ * Google не оставляли Mini App без календаря. */
+
+/* Пишет структуру месяцев в БД (вызывает фоновый цикл после обхода листов).
+ * HTTP-код, 0 — синхронизация выключена. */
+int schedule_month_meta_flush(const MonthSchedule *months, int count);
+
+/* Строит месяц-заглушку из month_meta. 0 — успех, -1 — записи нет/ошибка. */
+int schedule_month_from_db(const char *title, MonthSchedule *m);
+
+/* Заполняет out всеми месяцами из month_meta. Возвращает число месяцев. */
+int schedule_months_from_db(MonthSchedule *out, int max);
+
 #ifdef __cplusplus
 }
 #endif
