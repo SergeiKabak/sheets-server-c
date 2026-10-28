@@ -692,8 +692,12 @@ static int sb_count(const char *path, long *total) {
     return status;
 }
 
-/* ISO "2026-10-27T11:48:30.12+00:00" -> unix-время (0 при ошибке) */
-static time_t sb_parse_iso(const char *s) {
+/* ISO "2026-10-27T11:48:30.12+03:00" -> unix-время (0 при ошибке).
+ * Пояс обязателен: PostgREST отдаёт timestamptz со смещением сервера
+ * ("+03:00"), и без его учёта время читалось бы как UTC — тогда age_sec
+ * в /diag/supabase уходил в минус. Поддерживаем "Z", "+HH:MM"/"-HH:MM"
+ * и "+HHMM". */
+time_t sb_parse_iso(const char *s) {
     int Y = 0, M = 0, D = 0, h = 0, mi = 0, sec = 0;
     if (!s || sscanf(s, "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &mi, &sec) != 6)
         return 0;
@@ -705,7 +709,29 @@ static time_t sb_parse_iso(const char *s) {
     tmv.tm_hour = h;
     tmv.tm_min = mi;
     tmv.tm_sec = sec;
-    return timegm(&tmv);
+    time_t t = timegm(&tmv);
+
+    /* Ищем пояс после времени: 'Z' (UTC) или знак смещения. */
+    const char *p = strchr(s, 'T');
+    p = p ? p + 1 : s;
+    while (*p && *p != 'Z' && *p != 'z' && *p != '+' && *p != '-') p++;
+    if (*p == '+' || *p == '-') {
+        int sign = (*p == '-') ? -1 : 1;
+        const char *q = p + 1;
+        size_t nd = 0;
+        while (q[nd] >= '0' && q[nd] <= '9') nd++;
+        int oh = 0, om = 0;
+        if (nd >= 4) {   /* +HHMM */
+            oh = (q[0] - '0') * 10 + (q[1] - '0');
+            om = (q[2] - '0') * 10 + (q[3] - '0');
+        } else if (nd >= 2) {   /* +HH или +HH:MM */
+            oh = (q[0] - '0') * 10 + (q[1] - '0');
+            if (q[2] == ':' && q[3] >= '0' && q[3] <= '9')
+                om = (q[3] - '0') * 10 + (q[4] - '0');
+        }
+        t -= (time_t)sign * (oh * 3600 + om * 60);
+    }
+    return t;
 }
 
 int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {

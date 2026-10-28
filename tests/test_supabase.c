@@ -93,6 +93,22 @@ int main(void) {
 
     printf("OK   supabase buffer: дедуп, экранирование, учёт ошибок flush\n");
 
+    /* ---------- ISO-время PostgREST: пояс должен учитываться ----------
+       PostgREST отдаёт timestamptz в поясе сервера ("+03:00"). Без разбора
+       смещения время читалось как UTC, и age_sec в /diag/supabase был
+       отрицательным (-10129 вместо ~750). */
+    time_t iso_utc = sb_parse_iso("2026-10-28T17:57:17Z");
+    assert(iso_utc > 0);
+    assert(sb_parse_iso("2026-10-28T20:57:17+03:00") == iso_utc);
+    assert(sb_parse_iso("2026-10-28T20:57:17.850839+03:00") == iso_utc);
+    assert(sb_parse_iso("2026-10-28T20:57:17+0300") == iso_utc);
+    assert(sb_parse_iso("2026-10-28T17:57:17+00:00") == iso_utc);
+    assert(sb_parse_iso("2026-10-28T10:57:17-07:00") == iso_utc);
+    assert(sb_parse_iso("2026-10-28T17:57:17.5") == iso_utc);   /* без пояса = UTC */
+    assert(sb_parse_iso("мусор") == 0);
+    assert(sb_parse_iso(NULL) == 0);
+    printf("OK   sb_parse_iso: Z, +03:00, +0300, -07:00, без пояса\n");
+
     /* ---------- Этап 2: разбор месяца из строк PostgREST ---------- */
     const char *mrows =
         "[{\"day\":1,\"shift_time\":\"15:10-21:00\",\"cabinet\":\"K2.2\"},"

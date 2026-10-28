@@ -15,6 +15,7 @@
 #define SHEETS_INFRA_SUPABASE_H
 
 #include <stddef.h>
+#include <time.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -131,6 +132,12 @@ int sb_sub_list(SbSub *out, int max);
    (пульс). months/nmonths — месяцы из файлового кэша.
    Возвращает 0, -1 если общий счёт не получен или sync выключен. */
 int sb_diag(const char *const *months, int nmonths, char *out, size_t cap);
+
+/* Разбирает ISO-8601 из PostgREST ("2026-10-28T20:57:17.85+03:00") в
+   unix-время с учётом пояса; 0 — строка не разобрана.
+   Экспортируется ради офлайн-теста (tests/test_supabase.c): без учёта
+   смещения age_sec в /diag/supabase уходил в минус. */
+time_t sb_parse_iso(const char *s);
 
 #ifdef __cplusplus
 }
