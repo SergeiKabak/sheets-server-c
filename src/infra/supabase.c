@@ -493,12 +493,21 @@ int sb_reminder_due(long long now, SbReminder *out, int max) {
 
     char path[512];
     snprintf(path, sizeof(path),
-             "/reminders?select=id,chat_id,text&sent=eq.false"
+             "/reminders?select=id,chat_id,kind,remind_at,text&sent=eq.false"
              "&remind_at=lte.%s&order=remind_at.asc&limit=%d", ei, max);
-    free(ei);
 
     int status = 0;
     char *resp = sb_get(path, &status);
+    if (status == 400 || status == 404) {
+        /* Старая схема без kind — напоминания всё равно должны уходить. */
+        free(resp);
+        snprintf(path, sizeof(path),
+                 "/reminders?select=id,chat_id,remind_at,text&sent=eq.false"
+                 "&remind_at=lte.%s&order=remind_at.asc&limit=%d", ei, max);
+        resp = sb_get(path, &status);
+    }
+    free(ei);
+
     if (!resp || status < 200 || status > 299) {
         free(resp);
         return 0;
@@ -515,9 +524,15 @@ int sb_reminder_due(long long now, SbReminder *out, int max) {
         cJSON *jid = cJSON_GetObjectItemCaseSensitive(it, "id");
         cJSON *jcid = cJSON_GetObjectItemCaseSensitive(it, "chat_id");
         cJSON *jtx = cJSON_GetObjectItemCaseSensitive(it, "text");
+        cJSON *jkd = cJSON_GetObjectItemCaseSensitive(it, "kind");
+        cJSON *jat = cJSON_GetObjectItemCaseSensitive(it, "remind_at");
         if (!cJSON_IsNumber(jid) || !cJSON_IsNumber(jcid)) continue;
         out[n].id = (long long)jid->valuedouble;
         out[n].chat_id = (long long)jcid->valuedouble;
+        out[n].remind_at = (cJSON_IsString(jat) && jat->valuestring)
+                           ? (long long)sb_parse_iso(jat->valuestring) : 0;
+        snprintf(out[n].kind, sizeof(out[n].kind), "%s",
+                 (cJSON_IsString(jkd) && jkd->valuestring) ? jkd->valuestring : "");
         snprintf(out[n].text, sizeof(out[n].text), "%s",
                  cJSON_IsString(jtx) ? jtx->valuestring : "");
         n++;
@@ -545,7 +560,8 @@ int sb_reminder_cancel_auto(long long chat_id) {
     char path[320];
     snprintf(path, sizeof(path),
              "/reminders?chat_id=eq.%lld&sent=eq.false"
-             "&or=(kind.eq.shift_start,kind.eq.shift_end)", chat_id);
+             "&or=(kind.eq.shift_start,kind.eq.shift_missing,kind.eq.shift_end)",
+             chat_id);
     return sb_call("DELETE", path, NULL);
 }
 

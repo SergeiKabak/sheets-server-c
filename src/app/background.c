@@ -156,7 +156,7 @@ void background_run(AppContext *app) {
         month_schedules_free(months, c);
 
         /* Напоминания бота: отправляем созревшие (раз в минуту). */
-        int reminded = reminders_flush(&app->cfg);
+        int reminded = reminders_flush(&app->cfg, &app->tracking);
         if (reminded > 0) fprintf(stderr, "[remind] sent: %d\n", reminded);
 
         /* Кнопка меню чата (доступ к графику-таблице) ставится периодически:

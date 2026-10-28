@@ -81,11 +81,14 @@ int sb_time_day_read(const char *month_tab, int day,
 typedef struct {
     long long id;
     long long chat_id;
+    long long remind_at;                   /* UTC, секунды с эпохи */
+    char      kind[24];                    /* "once" | "shift_start" | ... */
     char      text[SB_REMINDER_TEXT];
 } SbReminder;
 
 /* Добавляет напоминание на момент remind_at (UTC, секунды с эпохи).
-   kind: "once" | "shift_start" | "shift_end" (для авто-напоминаний).
+   kind: "once" | "shift_start" | "shift_missing" | "shift_end"
+   (для авто-напоминаний).
    Возвращает HTTP-код (2xx — успех), 0 — выключено/сетевая ошибка. */
 int sb_reminder_add(long long chat_id, long long remind_at, const char *text);
 int sb_reminder_add_kind(long long chat_id, const char *kind, long long remind_at,

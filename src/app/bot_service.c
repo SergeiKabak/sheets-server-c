@@ -1,5 +1,6 @@
 #include "app/bot_service.h"
 
+#include "app/bot_keyboards.h"
 #include "app/month_cache.h"
 #include "app/reminder_service.h"
 #include "vendor/cJSON.h"
@@ -14,8 +15,7 @@
 /* Клавиатура учёта времени (Пришла / Ушла / Напомнить) в JSON-виде. */
 #define TRACK_KEYBOARD_JSON "{\"keyboard\":[[{\"text\":\"Пришла\"},{\"text\":\"Ушла\"}],[{\"text\":\"Напомнить\"}]],\"resize_keyboard\":true,\"is_persistent\":true}"
 
-/* Инлайн-клавиатура учёта времени. */
-#define TRACK_INLINE_JSON "{\"inline_keyboard\":[[{\"text\":\"Пришла\",\"callback_data\":\"trk_in\"},{\"text\":\"Ушла\",\"callback_data\":\"trk_out\"}]]}"
+/* TRACK_INLINE_JSON — в app/bot_keyboards.h (нужна и напоминаниям). */
 
 /* Выбор напоминания: разово на завтра или каждый день по графику. */
 #define REMIND_INLINE_JSON "{\"inline_keyboard\":[" \

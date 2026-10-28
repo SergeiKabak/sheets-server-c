@@ -239,11 +239,12 @@ int reminder_plan(long long now, int tz_offset,
 
 int reminder_day_slots(long long now, int tz_offset,
                        const MonthSchedule *months, int count,
-                       int start_lead, int end_delay,
+                       int start_lead, int end_delay, int no_mark_delay,
                        ReminderSlot *out, int max) {
     if (!out || max <= 0) return -1;
     if (start_lead < 0) start_lead = 0;
     if (end_delay < 0) end_delay = 0;
+    if (no_mark_delay < 0) no_mark_delay = 0;
 
     long long midnight = 0;
     int day = 0;
@@ -263,6 +264,7 @@ int reminder_day_slots(long long now, int tz_offset,
 
     int n = 0;
     long long at_start = midnight + (long long)(ds.start_min - start_lead) * 60;
+    long long at_missing = midnight + (long long)(ds.start_min + no_mark_delay) * 60;
     long long at_end = midnight + (long long)(ds.end_min + end_delay) * 60;
 
     if (at_start > now + 30 && n < max) {
@@ -278,6 +280,20 @@ int reminder_day_slots(long long now, int tz_offset,
                      "Смена начинается в %s (кабинет %s).\n"
                      "Отметьте приход кнопкой «Пришла».",
                      hhmm_start, ds.cabinet);
+        n++;
+    }
+
+    /* Через no_mark_delay минут после начала — «а отметки всё нет».
+       Отправку проверяет app-слой: если день уже отмечен, напоминание
+       снимается молча. */
+    if (at_missing > now + 30 && n < max) {
+        out[n].at = at_missing - tz_offset;
+        snprintf(out[n].kind, sizeof(out[n].kind), "shift_missing");
+        snprintf(out[n].text, sizeof(out[n].text),
+                 "Смена началась в %s, а отметки прихода нет.\n"
+                 "Отметьте начало кнопкой «Пришла» — или «Ушла», "
+                 "если смена уже закончилась.",
+                 hhmm_start);
         n++;
     }
 
@@ -297,4 +313,10 @@ int reminder_day_slots(long long now, int tz_offset,
     }
 
     return n;
+}
+
+int reminder_needs_no_mark(const char *t_in, const char *t_out) {
+    int has_in = (t_in && *t_in);
+    int has_out = (t_out && *t_out);
+    return (has_in || has_out) ? 0 : 1;
 }
