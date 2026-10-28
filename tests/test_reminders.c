@@ -209,6 +209,14 @@ int main(void) {
     ok(ns == 21 && slots[1].at == epoch(2026, 10, 27, 5, 0),
        "day tz+3: 08:00 локально = 05:00 UTC");
 
+    /* пояс UTC+3: 12:00 локально — прошедшие слоты не создаются
+       (иначе на UTC+3 в «прошлом» оказывались бы ещё 3 часа цепочки) */
+    ns = reminder_day_slots(epoch(2026, 10, 27, 9, 0), 3 * 3600, &m, 1, 15, 0, 30,
+                            slots, REMINDER_SLOTS_MAX);
+    ok(ns == 11 && slots[0].at == epoch(2026, 10, 27, 9, 30) &&
+       strcmp(slots[0].kind, "shift_missing") == 0,
+       "day tz+3: в 12:00 локально первый слот — 12:30 (09:30 UTC)");
+
     /* без графика — тихо ничего не планируем */
     ns = reminder_day_slots(morning, 0, NULL, 0, 15, 0, 30, slots,
                             REMINDER_SLOTS_MAX);

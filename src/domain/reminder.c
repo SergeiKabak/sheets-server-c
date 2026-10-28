@@ -263,13 +263,16 @@ int reminder_day_slots(long long now, int tz_offset,
     local_hhmm(midnight + (long long)ds.end_min * 60, hhmm_end,
                sizeof(hhmm_end));
 
+    /* Слоты строятся в «локальной» шкале (полночь местного дня), поэтому
+       «сейчас» для сравнений тоже должно быть локальным: now — UTC. */
     int n = 0;
+    long long now_local = now + tz_offset;
     long long step = (long long)repeat_min * 60;
     long long at_start = midnight + (long long)(ds.start_min - start_lead) * 60;
     long long shift_end = midnight + (long long)ds.end_min * 60;
     long long day_end = midnight + 86400;
 
-    if (at_start > now + 30 && n < max) {
+    if (at_start > now_local + 30 && n < max) {
         out[n].at = at_start - tz_offset;
         snprintf(out[n].kind, sizeof(out[n].kind), "shift_start");
         if (start_lead > 0)
@@ -295,7 +298,7 @@ int reminder_day_slots(long long now, int tz_offset,
 
     int in_added = 0;
     for (long long at = first_in; at < in_stop && n < max; at += step) {
-        if (at <= now + 30) continue;
+        if (at <= now_local + 30) continue;
         out[n].at = at - tz_offset;
         snprintf(out[n].kind, sizeof(out[n].kind), "shift_missing");
         if (in_added == 0)
@@ -317,7 +320,7 @@ int reminder_day_slots(long long now, int tz_offset,
 
     /* За END_LEAD минут до конца — «не забудьте отметить уход». */
     long long out_first = shift_end - (long long)REMINDER_END_LEAD_MIN * 60;
-    if (out_first > now + 30 && n < max) {
+    if (out_first > now_local + 30 && n < max) {
         out[n].at = out_first - tz_offset;
         snprintf(out[n].kind, sizeof(out[n].kind), "shift_end");
         snprintf(out[n].text, sizeof(out[n].text),
@@ -335,7 +338,7 @@ int reminder_day_slots(long long now, int tz_offset,
 
     int out_added = 0;
     for (long long at = out_main; at < out_limit && n < max; at += step) {
-        if (at <= now + 30) continue;
+        if (at <= now_local + 30) continue;
         if (at <= out_first) continue;      /* уже сказали «не забудьте» */
         out[n].at = at - tz_offset;
         snprintf(out[n].kind, sizeof(out[n].kind), "shift_end");
