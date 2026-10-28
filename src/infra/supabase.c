@@ -1013,6 +1013,22 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
     }
     char *log_buf = sbuf_take(&log_js);
 
+    /* структура месяцев (этап 5): сколько месяцев строится без Google.
+       Отсутствие таблицы — не ошибка синхронизации, просто 0. */
+    StrBuf mm_js;
+    sbuf_init(&mm_js);
+    {
+        SbMonthMeta mm[50];
+        int nm = sb_month_meta_list(mm, 50);
+        sbuf_appendf(&mm_js, "\"month_meta\":{\"total\":%d,\"months\":[", nm);
+        for (int i = 0; i < nm; i++) {
+            if (i) sbuf_append(&mm_js, ",");
+            sbuf_append_json_string(&mm_js, mm[i].month);
+        }
+        sbuf_append(&mm_js, "]}");
+    }
+    char *mm_buf = sbuf_take(&mm_js);
+
     char now[40];
     sb_now_iso(now, sizeof(now));
     int n = snprintf(out, cap,
@@ -1021,15 +1037,18 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
         "\"empty_shift\":%ld,\"empty_employee\":%ld},"
         "\"months\":[%s],"
         "\"time_entries\":{\"total\":%ld,\"months\":[%s]},"
-        "\"sync_log\":{%s}}",
+        "\"sync_log\":{%s},"
+        "%s}",
         (total >= 0) ? "true" : "false", now, errs,
         total, valid, empty_sh, empty_em,
         months_buf ? months_buf : "",
         te_total, te_months_buf ? te_months_buf : "",
-        log_buf ? log_buf : "");
+        log_buf ? log_buf : "",
+        mm_buf ? mm_buf : "\"month_meta\":{\"total\":0,\"months\":[]}");
     free(months_buf);
     free(te_months_buf);
     free(log_buf);
+    free(mm_buf);
     if (n < 0 || (size_t)n >= cap) return -1;
     return (total >= 0) ? 0 : -1;
 }
