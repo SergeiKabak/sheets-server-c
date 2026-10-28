@@ -25,9 +25,9 @@ extern "C" {
 #define REMINDER_START_LEAD_DEFAULT 15
 #define REMINDER_END_DELAY_DEFAULT  0
 
-/* Через сколько минут после начала смены напомнить, если отметки прихода
- * всё ещё нет («отметьте начало — или конец, если уже закончили»). */
-#define REMINDER_NO_MARK_DELAY 5
+/* Повторы «отметки всё ещё нет» и границы цепочек — в domain/reminder.h
+ * (REMINDER_REPEAT_MIN, REMINDER_CHECK_FROM_HOUR, REMINDER_END_LEAD_MIN,
+ * REMINDER_OUT_TAIL_MIN): это правило планирования, а не настройка чата. */
 
 /* Допустимые значения кнопок настроек. */
 #define REMINDER_LEAD_MAX  120
@@ -73,7 +73,7 @@ int reminders_materialize(const AppConfig *cfg, const TrackingService *svc,
                           const MonthSchedule *months, int count);
 
 /* Отправляет созревшие напоминания (вызывается фоновым циклом).
- * Для «нет отметки прихода» сначала проверяет день в БД: если отметка уже
+ * Для «нет отметки» сначала проверяет день в БД: если нужная отметка уже
  * есть, напоминание снимается молча. Возвращает число отправленных. */
 int reminders_flush(const AppConfig *cfg, const TrackingService *svc);
 

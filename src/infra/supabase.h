@@ -98,6 +98,11 @@ int sb_reminder_add_kind(long long chat_id, const char *kind, long long remind_a
    Возвращает число записей (0 — нет или ошибка). */
 int sb_reminder_due(long long now, SbReminder *out, int max);
 
+/* Моменты уже запланированных напоминаний чата с remind_at >= from
+   (отправленные тоже — чтобы не вставлять их заново).
+   Возвращает число записей (0 — нет или ошибка). */
+int sb_reminder_times(long long chat_id, long long from, long long *out, int max);
+
 /* Помечает напоминание отправленным. HTTP-код, 0 — выключено/ошибка. */
 int sb_reminder_mark_sent(long long id);
 

@@ -239,12 +239,13 @@ int reminder_plan(long long now, int tz_offset,
 
 int reminder_day_slots(long long now, int tz_offset,
                        const MonthSchedule *months, int count,
-                       int start_lead, int end_delay, int no_mark_delay,
+                       int start_lead, int end_delay, int repeat_min,
                        ReminderSlot *out, int max) {
     if (!out || max <= 0) return -1;
     if (start_lead < 0) start_lead = 0;
     if (end_delay < 0) end_delay = 0;
-    if (no_mark_delay < 0) no_mark_delay = 0;
+    /* Шаг повторов меньше 30 минут превратил бы день в поток сообщений. */
+    if (repeat_min < REMINDER_REPEAT_MIN) repeat_min = REMINDER_REPEAT_MIN;
 
     long long midnight = 0;
     int day = 0;
@@ -263,9 +264,10 @@ int reminder_day_slots(long long now, int tz_offset,
                sizeof(hhmm_end));
 
     int n = 0;
+    long long step = (long long)repeat_min * 60;
     long long at_start = midnight + (long long)(ds.start_min - start_lead) * 60;
-    long long at_missing = midnight + (long long)(ds.start_min + no_mark_delay) * 60;
-    long long at_end = midnight + (long long)(ds.end_min + end_delay) * 60;
+    long long shift_end = midnight + (long long)ds.end_min * 60;
+    long long day_end = midnight + 86400;
 
     if (at_start > now + 30 && n < max) {
         out[n].at = at_start - tz_offset;
@@ -283,40 +285,91 @@ int reminder_day_slots(long long now, int tz_offset,
         n++;
     }
 
-    /* Через no_mark_delay минут после начала — «а отметки всё нет».
-       Отправку проверяет app-слой: если день уже отмечен, напоминание
-       снимается молча. */
-    if (at_missing > now + 30 && n < max) {
-        out[n].at = at_missing - tz_offset;
+    /* Приход: первый контроль — через repeat_min после начала (но не раньше
+       08:00), дальше каждые repeat_min, пока смена не подошла к концу.
+       Отправку проверяет app-слой: если день уже отмечен, снимаем молча. */
+    long long first_in = midnight + (long long)(ds.start_min + repeat_min) * 60;
+    long long check_from = midnight + (long long)REMINDER_CHECK_FROM_HOUR * 3600;
+    if (first_in < check_from) first_in = check_from;
+    long long in_stop = shift_end - (long long)REMINDER_END_LEAD_MIN * 60;
+
+    int in_added = 0;
+    for (long long at = first_in; at < in_stop && n < max; at += step) {
+        if (at <= now + 30) continue;
+        out[n].at = at - tz_offset;
         snprintf(out[n].kind, sizeof(out[n].kind), "shift_missing");
-        snprintf(out[n].text, sizeof(out[n].text),
-                 "Смена началась в %s, а отметки прихода нет.\n"
-                 "Отметьте начало кнопкой «Пришла» — или «Ушла», "
-                 "если смена уже закончилась.",
-                 hhmm_start);
+        if (in_added == 0)
+            snprintf(out[n].text, sizeof(out[n].text),
+                     "Смена началась в %s, а отметки прихода нет.\n"
+                     "Отметьте начало кнопкой «Пришла» — или «Ушла», "
+                     "если смена уже закончилась.",
+                     hhmm_start);
+        else
+            snprintf(out[n].text, sizeof(out[n].text),
+                     "Напоминаю ещё раз: смена началась в %s, "
+                     "а отметки прихода нет.\n"
+                     "Отметьте начало кнопкой «Пришла» — или «Ушла», "
+                     "если смена уже закончилась.",
+                     hhmm_start);
+        in_added++;
         n++;
     }
 
-    if (at_end > now + 30 && n < max) {
-        out[n].at = at_end - tz_offset;
+    /* За END_LEAD минут до конца — «не забудьте отметить уход». */
+    long long out_first = shift_end - (long long)REMINDER_END_LEAD_MIN * 60;
+    if (out_first > now + 30 && n < max) {
+        out[n].at = out_first - tz_offset;
         snprintf(out[n].kind, sizeof(out[n].kind), "shift_end");
-        if (end_delay > 0)
+        snprintf(out[n].text, sizeof(out[n].text),
+                 "Смена заканчивается в %s (через %d мин).\n"
+                 "Не забудьте отметить уход кнопкой «Ушла».",
+                 hhmm_end, REMINDER_END_LEAD_MIN);
+        n++;
+    }
+
+    /* Конец смены (+end_delay) и повторы каждые repeat_min, пока ухода нет.
+       Не дольше OUT_TAIL минут после конца и не позже полуночи. */
+    long long out_main = shift_end + (long long)end_delay * 60;
+    long long out_limit = shift_end + (long long)REMINDER_OUT_TAIL_MIN * 60;
+    if (out_limit > day_end) out_limit = day_end;
+
+    int out_added = 0;
+    for (long long at = out_main; at < out_limit && n < max; at += step) {
+        if (at <= now + 30) continue;
+        if (at <= out_first) continue;      /* уже сказали «не забудьте» */
+        out[n].at = at - tz_offset;
+        snprintf(out[n].kind, sizeof(out[n].kind), "shift_end");
+        if (out_added == 0) {
+            if (end_delay > 0)
+                snprintf(out[n].text, sizeof(out[n].text),
+                         "Смена закончилась в %s (%d мин назад).\n"
+                         "Отметьте уход кнопкой «Ушла».",
+                         hhmm_end, end_delay);
+            else
+                snprintf(out[n].text, sizeof(out[n].text),
+                         "Смена закончилась в %s.\n"
+                         "Отметьте уход кнопкой «Ушла».", hhmm_end);
+        } else {
             snprintf(out[n].text, sizeof(out[n].text),
-                     "Смена закончилась в %s (%d мин назад).\n"
-                     "Отметьте уход кнопкой «Ушла».",
-                     hhmm_end, end_delay);
-        else
-            snprintf(out[n].text, sizeof(out[n].text),
-                     "Смена закончилась в %s.\n"
+                     "Напоминаю ещё раз: смена закончилась в %s.\n"
                      "Отметьте уход кнопкой «Ушла».", hhmm_end);
+        }
+        out_added++;
         n++;
     }
 
     return n;
 }
 
-int reminder_needs_no_mark(const char *t_in, const char *t_out) {
+int reminder_mark_present(const char *t_in, const char *t_out, int which) {
     int has_in = (t_in && *t_in);
     int has_out = (t_out && *t_out);
-    return (has_in || has_out) ? 0 : 1;
+    if ((which & REMINDER_MARK_IN) && has_in) return 1;
+    if ((which & REMINDER_MARK_OUT) && has_out) return 1;
+    return 0;
+}
+
+int reminder_needs_no_mark(const char *t_in, const char *t_out) {
+    return reminder_mark_present(t_in, t_out,
+                                 REMINDER_MARK_IN | REMINDER_MARK_OUT) ? 0 : 1;
 }

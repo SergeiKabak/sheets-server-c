@@ -17,10 +17,11 @@ static int clamp_minutes(int v, int max) {
     return v;
 }
 
-/* Отмечен ли день напоминания: 1 — отметки нет (напоминать), 0 — уже
-   отмечено (приход и/или уход), -1 — БД недоступна (повторим на следующем
-   тике, ничего не помечаем). */
-static int no_mark_missing(const TrackingService *svc, long long remind_at) {
+/* Есть ли уже нужная отметка: 1 — нет (напоминать), 0 — есть (снять молча),
+   -1 — БД недоступна (повторим на следующем тике, ничего не помечаем).
+   which — REMINDER_MARK_IN / REMINDER_MARK_OUT (см. domain/reminder.h). */
+static int mark_missing(const TrackingService *svc, long long remind_at,
+                        int which) {
     int tz = svc ? svc->tz_offset : 0;
     long long local = remind_at + tz;
     time_t t = (time_t)(local - local % 86400);
@@ -35,7 +36,7 @@ static int no_mark_missing(const TrackingService *svc, long long remind_at) {
                               t_out, sizeof(t_out), NULL, 0, NULL, 0);
     if (rc < 0) return -1;
     if (rc == 1) return 1;               /* строки дня нет — не отмечено */
-    return reminder_needs_no_mark(t_in, t_out);
+    return reminder_mark_present(t_in, t_out, which) ? 0 : 1;
 }
 
 int reminder_schedule(const AppConfig *cfg, TrackingService *svc,
@@ -113,6 +114,8 @@ int reminders_materialize(const AppConfig *cfg, const TrackingService *svc,
 
     long long now = (long long)time(NULL);
     int tz = svc ? svc->tz_offset : 0;
+    long long local_now = now + tz;
+    long long day_start = local_now - local_now % 86400 - tz;  /* UTC-начало суток */
     int added = 0;
 
     for (int i = 0; i < nc; i++) {
@@ -120,9 +123,24 @@ int reminders_materialize(const AppConfig *cfg, const TrackingService *svc,
         int ns = reminder_day_slots(now, tz, months, count,
                                     subs[i].start_lead_min,
                                     subs[i].end_delay_min,
-                                    REMINDER_NO_MARK_DELAY,
+                                    REMINDER_REPEAT_MIN,
                                     slots, REMINDER_SLOTS_MAX);
+        if (ns <= 0) continue;
+
+        /* Уже запланированное на сегодня не вставляем заново: цепочки
+           «каждые 30 минут» — это десятки строк, и без этой проверки каждый
+           тик слал бы десятки лишних POST (уникальный индекс их отсекает,
+           но запросы всё равно уходят). */
+        long long have[REMINDER_SLOTS_MAX * 2];
+        int nh = sb_reminder_times(subs[i].chat_id, day_start, have,
+                                   (int)(sizeof(have) / sizeof(have[0])));
+
         for (int j = 0; j < ns; j++) {
+            int dup = 0;
+            for (int k = 0; k < nh; k++) {
+                if (have[k] == slots[j].at) { dup = 1; break; }
+            }
+            if (dup) continue;
             int st = sb_reminder_add_kind(subs[i].chat_id, slots[j].kind,
                                           slots[j].at, slots[j].text);
             if (st >= 200 && st <= 299) added++;
@@ -141,10 +159,16 @@ int reminders_flush(const AppConfig *cfg, const TrackingService *svc) {
     for (int i = 0; i < n; i++) {
         if (!list[i].text[0]) continue;
 
-        /* «Смена началась, а отметки нет» — проверяем день в БД прямо перед
-           отправкой: если пользователь уже отметился, сообщение не нужно. */
-        if (strcmp(list[i].kind, "shift_missing") == 0) {
-            int missing = no_mark_missing(svc, list[i].remind_at);
+        /* «Отметки нет» — проверяем день в БД прямо перед отправкой:
+           приход (или уход) уже отмечен → сообщение не нужно. */
+        int which = 0;
+        if (strcmp(list[i].kind, "shift_missing") == 0)
+            which = REMINDER_MARK_IN | REMINDER_MARK_OUT;
+        else if (strcmp(list[i].kind, "shift_end") == 0)
+            which = REMINDER_MARK_OUT;
+
+        if (which) {
+            int missing = mark_missing(svc, list[i].remind_at, which);
             if (missing == 0) {           /* уже отмечено — снимаем молча */
                 sb_reminder_mark_sent(list[i].id);
                 continue;

@@ -122,90 +122,126 @@ int main(void) {
 
     ReminderSlot slots[REMINDER_SLOTS_MAX];
 
-    /* 27.10 06:00 — смена 7:30-14:40: начало, «нет отметки», конец */
+    /* 27.10 06:00 — смена 7:30-14:40:
+       7:15 начало, 8:00..14:00 приход каждые 30 мин,
+       14:10 «скоро конец», 14:40..17:10 уход каждые 30 мин. */
     long long morning = epoch(2026, 10, 27, 6, 0);
-    int ns = reminder_day_slots(morning, 0, &m, 1, 15, 0, 5, slots,
+    int ns = reminder_day_slots(morning, 0, &m, 1, 15, 0, 30, slots,
                                 REMINDER_SLOTS_MAX);
-    ok(ns == 3, "day: три напоминания (начало, нет отметки, конец)");
-    ok(ns == 3 && slots[0].at == epoch(2026, 10, 27, 7, 15),
+    ok(ns == 21, "day: 21 напоминание (начало, 13 приход, 7 уход)");
+    ok(ns == 21 && slots[0].at == epoch(2026, 10, 27, 7, 15),
        "day: начало — за 15 мин (07:15)");
-    ok(ns == 3 && strcmp(slots[0].kind, "shift_start") == 0,
+    ok(ns == 21 && strcmp(slots[0].kind, "shift_start") == 0,
        "day: вид первого — shift_start");
-    ok(ns == 3 && strstr(slots[0].text, "Пришла") != NULL,
+    ok(ns == 21 && strstr(slots[0].text, "Пришла") != NULL,
        "day: текст просит нажать «Пришла»");
-    ok(ns == 3 && strstr(slots[0].text, "15 мин") != NULL,
+    ok(ns == 21 && strstr(slots[0].text, "15 мин") != NULL,
        "day: в тексте «через 15 мин»");
 
-    ok(ns == 3 && slots[1].at == epoch(2026, 10, 27, 7, 35),
-       "day: нет отметки — через 5 мин после начала (07:35)");
-    ok(ns == 3 && strcmp(slots[1].kind, "shift_missing") == 0,
+    ok(ns == 21 && slots[1].at == epoch(2026, 10, 27, 8, 0),
+       "day: первый контроль прихода — 08:00 (через 30 мин)");
+    ok(ns == 21 && strcmp(slots[1].kind, "shift_missing") == 0,
        "day: вид второго — shift_missing");
-    ok(ns == 3 && strstr(slots[1].text, "отметки прихода нет") != NULL,
+    ok(ns == 21 && strstr(slots[1].text, "отметки прихода нет") != NULL,
        "day: текст про отсутствие отметки");
-    ok(ns == 3 && strstr(slots[1].text, "Пришла") != NULL &&
+    ok(ns == 21 && strstr(slots[1].text, "Пришла") != NULL &&
        strstr(slots[1].text, "Ушла") != NULL,
        "day: текст предлагает и начало, и конец");
+    ok(ns == 21 && strstr(slots[1].text, "ещё раз") == NULL,
+       "day: первое напоминание — без «ещё раз»");
 
-    ok(ns == 3 && slots[2].at == epoch(2026, 10, 27, 14, 40),
-       "day: конец — в 14:40");
-    ok(ns == 3 && strcmp(slots[2].kind, "shift_end") == 0,
-       "day: вид третьего — shift_end");
-    ok(ns == 3 && strstr(slots[2].text, "Ушла") != NULL,
+    ok(ns == 21 && slots[2].at == epoch(2026, 10, 27, 8, 30) &&
+       strstr(slots[2].text, "ещё раз") != NULL,
+       "day: повтор прихода — 08:30 с «напоминаю ещё раз»");
+    ok(ns == 21 && slots[13].at == epoch(2026, 10, 27, 14, 0),
+       "day: последний приход — 14:00 (за 30 мин до конца)");
+
+    ok(ns == 21 && slots[14].at == epoch(2026, 10, 27, 14, 10) &&
+       strcmp(slots[14].kind, "shift_end") == 0 &&
+       strstr(slots[14].text, "Не забудьте") != NULL,
+       "day: за 30 мин до конца — «не забудьте про уход»");
+    ok(ns == 21 && slots[15].at == epoch(2026, 10, 27, 14, 40),
+       "day: конец смены — 14:40");
+    ok(ns == 21 && strstr(slots[15].text, "Ушла") != NULL,
        "day: текст просит нажать «Ушла»");
+    ok(ns == 21 && slots[20].at == epoch(2026, 10, 27, 17, 10) &&
+       strstr(slots[20].text, "ещё раз") != NULL,
+       "day: последний уход — 17:10 (3 часа после конца)");
 
-    /* 27.10 07:20 — начало прошло, «нет отметки» ещё впереди */
-    ns = reminder_day_slots(epoch(2026, 10, 27, 7, 20), 0, &m, 1, 15, 0, 5,
+    /* 27.10 07:20 — начало прошло, первый контроль прихода ещё впереди */
+    ns = reminder_day_slots(epoch(2026, 10, 27, 7, 20), 0, &m, 1, 15, 0, 30,
                             slots, REMINDER_SLOTS_MAX);
-    ok(ns == 2 && slots[0].at == epoch(2026, 10, 27, 7, 35),
-       "day: прошедшее начало пропущено, «нет отметки» осталось");
-    ok(ns == 2 && strcmp(slots[0].kind, "shift_missing") == 0,
+    ok(ns == 20 && slots[0].at == epoch(2026, 10, 27, 8, 0),
+       "day: прошедшее начало пропущено, приход остался");
+    ok(ns == 20 && strcmp(slots[0].kind, "shift_missing") == 0,
        "day: первым идёт shift_missing");
 
-    /* 27.10 07:40 — прошло и «нет отметки»: остаётся только конец */
-    ns = reminder_day_slots(epoch(2026, 10, 27, 7, 40), 0, &m, 1, 15, 0, 5,
+    /* 27.10 14:30 — приход уже не напоминаем, уход ещё впереди */
+    ns = reminder_day_slots(epoch(2026, 10, 27, 14, 30), 0, &m, 1, 15, 0, 30,
                             slots, REMINDER_SLOTS_MAX);
-    ok(ns == 1 && slots[0].at == epoch(2026, 10, 27, 14, 40),
-       "day: прошедшее «нет отметки» пропущено");
+    ok(ns == 6 && slots[0].at == epoch(2026, 10, 27, 14, 40),
+       "day: после 14:10 остаются только напоминания об уходе");
 
-    /* 27.10 15:00 — смена закончилась, напоминать не о чем */
-    ns = reminder_day_slots(epoch(2026, 10, 27, 15, 0), 0, &m, 1, 15, 0, 5,
+    /* 27.10 18:00 — всё позади */
+    ns = reminder_day_slots(epoch(2026, 10, 27, 18, 0), 0, &m, 1, 15, 0, 30,
                             slots, REMINDER_SLOTS_MAX);
     ok(ns == 0, "day: после смены — пусто");
 
-    /* задержка после конца смены: напомнить через 10 минут (14:50) */
-    ns = reminder_day_slots(morning, 0, &m, 1, 15, 10, 5, slots,
+    /* задержка после конца смены: первый уход — через 10 минут (14:50) */
+    ns = reminder_day_slots(morning, 0, &m, 1, 15, 10, 30, slots,
                             REMINDER_SLOTS_MAX);
-    ok(ns == 3 && slots[2].at == epoch(2026, 10, 27, 14, 50),
+    ok(ns == 21 && slots[15].at == epoch(2026, 10, 27, 14, 50),
        "day: уход — через 10 мин после конца (14:50)");
-    ok(ns == 3 && strstr(slots[2].text, "10 мин назад") != NULL,
+    ok(ns == 21 && strstr(slots[15].text, "10 мин назад") != NULL,
        "day: в тексте «10 мин назад»");
 
-    /* «нет отметки» сразу в момент начала (задержка 0) */
-    ns = reminder_day_slots(morning, 0, &m, 1, 15, 0, 0, slots,
+    /* шаг меньше 30 минут не принимаем (защита от потока сообщений) */
+    ns = reminder_day_slots(morning, 0, &m, 1, 15, 0, 5, slots,
                             REMINDER_SLOTS_MAX);
-    ok(ns == 3 && slots[1].at == epoch(2026, 10, 27, 7, 30) &&
-       strcmp(slots[1].kind, "shift_missing") == 0,
-       "day: задержка 0 — проверка отметки в 07:30");
+    ok(ns == 21 && slots[1].at == epoch(2026, 10, 27, 8, 0),
+       "day: repeat_min < 30 поднимается до 30");
 
     /* пояс UTC+3: 06:30 локально = 03:30 UTC */
-    ns = reminder_day_slots(epoch(2026, 10, 27, 3, 30), 3 * 3600, &m, 1, 15, 0, 5,
+    ns = reminder_day_slots(epoch(2026, 10, 27, 3, 30), 3 * 3600, &m, 1, 15, 0, 30,
                             slots, REMINDER_SLOTS_MAX);
-    ok(ns == 3 && slots[0].at == epoch(2026, 10, 27, 4, 15),
+    ok(ns == 21 && slots[0].at == epoch(2026, 10, 27, 4, 15),
        "day tz+3: 07:15 локально = 04:15 UTC");
-    ok(ns == 3 && slots[1].at == epoch(2026, 10, 27, 4, 35),
-       "day tz+3: 07:35 локально = 04:35 UTC");
+    ok(ns == 21 && slots[1].at == epoch(2026, 10, 27, 5, 0),
+       "day tz+3: 08:00 локально = 05:00 UTC");
 
     /* без графика — тихо ничего не планируем */
-    ns = reminder_day_slots(morning, 0, NULL, 0, 15, 0, 5, slots,
+    ns = reminder_day_slots(morning, 0, NULL, 0, 15, 0, 30, slots,
                             REMINDER_SLOTS_MAX);
     ok(ns == 0, "day: нет кэша графика — пусто");
 
     /* смена есть, но кабинета на сегодня нет */
     MonthSchedule off = month_with_shift();
     off.shift1 = row2; off.shift2 = row2;
-    ns = reminder_day_slots(morning, 0, &off, 1, 15, 0, 5, slots,
+    ns = reminder_day_slots(morning, 0, &off, 1, 15, 0, 30, slots,
                             REMINDER_SLOTS_MAX);
     ok(ns == 0, "day: сегодня смены нет — пусто");
+
+    /* раньше 08:00 не будим: смена 6:00-12:00 — первый контроль в 08:00 */
+    char *saved_shift = row1[1];
+    row1[1] = "6:00-12:00";
+    ns = reminder_day_slots(epoch(2026, 10, 27, 5, 0), 0, &m, 1, 0, 0, 30,
+                            slots, REMINDER_SLOTS_MAX);
+    ok(ns == 15 && slots[0].at == epoch(2026, 10, 27, 6, 0) &&
+       strcmp(slots[0].kind, "shift_start") == 0,
+       "day: смена с 6:00 — начало в 06:00");
+    ok(ns == 15 && slots[1].at == epoch(2026, 10, 27, 8, 0),
+       "day: первый контроль прихода — не раньше 08:00");
+    row1[1] = saved_shift;
+
+    /* две смены в один день: 7:30-14:40 и 15:10-21:00 — 33 напоминания,
+       все влезают в REMINDER_SLOTS_MAX */
+    row2[28] = "K2.1";
+    ns = reminder_day_slots(morning, 0, &m, 1, 15, 0, 30, slots,
+                            REMINDER_SLOTS_MAX);
+    ok(ns == 33, "day: две смены — 33 напоминания (приход до 20:00)");
+    ok(ns == 33 && slots[ns - 1].at == epoch(2026, 10, 27, 23, 30),
+       "day: последнее напоминание — 23:30 (не за полночь)");
+    row2[28] = NULL;
 
     /* решение «напоминать или нет» по отметкам дня */
     ok(reminder_needs_no_mark("", "") == 1, "no-mark: пустой день — напоминать");
@@ -214,6 +250,21 @@ int main(void) {
     ok(reminder_needs_no_mark("", "14:40") == 0, "no-mark: уход есть — молчим");
     ok(reminder_needs_no_mark("07:30", "14:40") == 0,
        "no-mark: полный день — молчим");
+
+    ok(reminder_mark_present("07:30", "", REMINDER_MARK_IN) == 1,
+       "mark: приход есть — для прихода хватит");
+    ok(reminder_mark_present("07:30", "", REMINDER_MARK_OUT) == 0,
+       "mark: приход есть, но для ухода этого мало");
+    ok(reminder_mark_present("", "14:40", REMINDER_MARK_OUT) == 1,
+       "mark: уход есть — для ухода хватит");
+    ok(reminder_mark_present("", "14:40", REMINDER_MARK_IN) == 0,
+       "mark: уход есть, но прихода нет");
+    ok(reminder_mark_present(NULL, NULL,
+                             REMINDER_MARK_IN | REMINDER_MARK_OUT) == 0,
+       "mark: пустой день — ничего нет");
+    ok(reminder_mark_present("07:30", "",
+                             REMINDER_MARK_IN | REMINDER_MARK_OUT) == 1,
+       "mark: любая отметка закрывает напоминание о приходе");
 
     if (fails) printf("\nFAILURES: %d\n", fails);
     else printf("\nALL TESTS PASSED\n");

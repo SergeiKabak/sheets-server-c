@@ -541,6 +541,44 @@ int sb_reminder_due(long long now, SbReminder *out, int max) {
     return n;
 }
 
+int sb_reminder_times(long long chat_id, long long from, long long *out,
+                      int max) {
+    if (!sb_on || !out || max <= 0) return 0;
+
+    char iso[32];
+    sb_epoch_iso(from, iso, sizeof(iso));
+    char *ei = url_encode(iso);
+    if (!ei) return 0;
+
+    char path[384];
+    snprintf(path, sizeof(path),
+             "/reminders?select=remind_at&chat_id=eq.%lld&remind_at=gte.%s"
+             "&order=remind_at.asc&limit=%d", chat_id, ei, max);
+    free(ei);
+
+    int status = 0;
+    char *resp = sb_get(path, &status);
+    if (!resp || status < 200 || status > 299) {
+        free(resp);
+        return 0;
+    }
+
+    cJSON *arr = cJSON_Parse(resp);
+    free(resp);
+    if (!cJSON_IsArray(arr)) { cJSON_Delete(arr); return 0; }
+
+    int n = 0;
+    cJSON *it = NULL;
+    cJSON_ArrayForEach(it, arr) {
+        if (n >= max) break;
+        cJSON *jat = cJSON_GetObjectItemCaseSensitive(it, "remind_at");
+        if (!cJSON_IsString(jat) || !jat->valuestring) continue;
+        out[n++] = (long long)sb_parse_iso(jat->valuestring);
+    }
+    cJSON_Delete(arr);
+    return n;
+}
+
 int sb_reminder_mark_sent(long long id) {
     if (!sb_on) return 0;
     char path[128];
