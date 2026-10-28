@@ -85,12 +85,14 @@ void background_run(AppContext *app) {
                 int errs = 0;
                 int rows = sb_flush(titles, nt, &errs);
                 fprintf(stderr, "[sync] supabase schedule: rows=%d errors=%d\n", rows, errs);
-                static int cycle = 0;
-                cycle++;
-                /* пульс в sync_log каждые ~10 циклов + любая ошибка отдельно */
-                if (errs || cycle % 10 == 0)
+                /* Пульс в sync_log — раз в 10 минут по часам (не по числу
+                   циклов: Google теперь читается раз в 5 минут) + любая ошибка */
+                static time_t last_pulse = 0;
+                if (errs || time(NULL) - last_pulse >= 600) {
+                    last_pulse = time(NULL);
                     sb_log("schedule", "", rows, errs == 0,
                            errs ? "HTTP error при синхронизации графика" : "");
+                }
             }
         } else {
             c = month_cache_load(months, SCHEDULE_MAX_MONTHS);
