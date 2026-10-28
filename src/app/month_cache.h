@@ -20,8 +20,10 @@ extern "C" {
 #define MONTHS_FILE        "/tmp/months.dat"
 #define CABINET_INDEX_FILE "/tmp/cabinet_index.txt"
 
-/* Возраст кэша готового ответа месяца (секунды). */
-#define MONTH_RESP_TTL 600
+/* Возраст кэша готового ответа месяца (секунды). Держим равным TTL чтения
+ * Google (SCHEDULE_GOOGLE_TTL): правки графика видны не позже чем через
+ * 5 минут и в БД, и в ответе Mini App. */
+#define MONTH_RESP_TTL 300
 
 /* ---------- месяцы-листы ---------- */
 
