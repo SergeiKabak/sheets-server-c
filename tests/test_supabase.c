@@ -190,6 +190,18 @@ int main(void) {
     assert(sb_time_upsert("10.2026", 5, "07:30", "14:40", "7.17", "3585.00") == 0);
     assert(sb_time_upsert("10.2026", 6, "08:00", "", NULL, NULL) == 0);
 
+    /* ставка месяца: неверные аргументы -> 0 без сети; недоступная БД ->
+       ошибка, но не падение (то же для пересчёта суммы дня) */
+    double rate = 0;
+    assert(sb_month_rate_set("", "600") == 0);
+    assert(sb_month_rate_set("10.2026", "abc") == 0);
+    assert(sb_month_rate_set("10.2026", "600") == 0);
+    assert(sb_month_rate_get("10.2026", &rate) == -1);
+    assert(sb_month_rate_get(NULL, &rate) == -1);
+    assert(sb_time_amount_set("10.2026", 0, "100.00") == 0);
+    assert(sb_time_amount_set("10.2026", 5, "abc") == 0);
+    assert(sb_time_amount_set("10.2026", 5, "100.00") == 0);
+
     /* ---------- Диагностика: недоступная база -> ok:false, без падения ---------- */
     {
         const char *ms[2] = { "Октябрь 2026", "Ноябрь 2026" };

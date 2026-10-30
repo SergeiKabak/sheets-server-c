@@ -43,6 +43,11 @@
     <h3>Учёт рабочего времени</h3>
     <div class="row"><button id="trk-in" class="in">Пришла</button><button id="trk-out" class="out">Ушла</button></div>
     <div class="row" style="margin-top:8px"><button id="trk-money" class="mn">Деньги</button></div>
+    <div class="rate-row">
+      <label for="trk-rate">Ставка за час, ₽</label>
+      <input id="trk-rate" type="number" min="0" step="1" inputmode="decimal" placeholder="—">
+      <button id="trk-rate-save" class="mn" type="button">Сохранить</button>
+    </div>
     <div class="st" id="trk-st"></div>
     <div class="st">Тап по дню — внести время (день со сменой, ещё не отмеченный) или посмотреть отработанное. Тап по кабинету — с кем работаете. Кнопка «Деньги» — заработок по дням в календаре. Выходные сб/вс помечены красным, «раб.» — рабочая смена в выходной.</div>
   </div>

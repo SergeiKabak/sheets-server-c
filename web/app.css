@@ -102,6 +102,14 @@ body { margin: 0; font-family: DejaVu Sans, Arial, sans-serif; background: var(-
 .trk .mn { background: #1565C0 }
 .trk .out { background: #C62828 }
 .trk button:disabled { opacity: .5 }
+.trk .rate-row { display: flex; align-items: center; gap: 8px; margin-top: 8px }
+.trk .rate-row label { flex: none; font-size: 13px; opacity: .8 }
+.trk .rate-row input {
+  flex: 1; min-width: 0; padding: 10px; font-size: 15px;
+  color: var(--fg); background: var(--card);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.trk .rate-row button { flex: none; padding: 10px 12px }
 #trk-money.on { outline: 3px solid #FF9800; outline-offset: 2px; background: #FF9800 }
 .trk .st { margin-top: 8px; font-size: 13px; color: var(--fg); opacity: .8 }
 

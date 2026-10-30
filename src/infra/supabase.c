@@ -425,6 +425,76 @@ int sb_time_day_read(const char *month_tab, int day,
     return rc;
 }
 
+/* ================= Ставка месяца (month_rates) ================= */
+
+int sb_month_rate_get(const char *month_tab, double *rate) {
+    if (!sb_on || !month_tab || !*month_tab || !rate) return -1;
+
+    char *em = url_encode(month_tab);
+    if (!em) return -1;
+    char path[512];
+    snprintf(path, sizeof(path),
+             "/month_rates?month=eq.%s&select=rate&limit=1", em);
+    free(em);
+
+    int st = 0;
+    char *body = sb_get(path, &st);
+    if (!body || st < 200 || st > 299) { free(body); return -1; }
+    cJSON *arr = cJSON_Parse(body);
+    free(body);
+    if (!cJSON_IsArray(arr)) { cJSON_Delete(arr); return -1; }
+    if (cJSON_GetArraySize(arr) == 0) { cJSON_Delete(arr); return 1; }
+
+    cJSON *it = cJSON_GetArrayItem(arr, 0);
+    cJSON *jr = cJSON_GetObjectItemCaseSensitive(it, "rate");
+    double v = 0;
+    if (cJSON_IsNumber(jr)) v = jr->valuedouble;
+    else if (cJSON_IsString(jr) && jr->valuestring) v = num_parse(jr->valuestring);
+    cJSON_Delete(arr);
+
+    if (!(v > 0)) return -1;
+    *rate = v;
+    return 0;
+}
+
+int sb_month_rate_set(const char *month_tab, const char *rate) {
+    if (!sb_on || !month_tab || !*month_tab) return 0;
+    if (!rate || !num_is_valid(rate)) return 0;
+
+    StrBuf sb;
+    sbuf_init(&sb);
+    sbuf_append(&sb, "{\"month\":");
+    sbuf_append_json_string(&sb, month_tab);
+    sbuf_appendf(&sb, ",\"rate\":%s}", rate);
+    char *body = sbuf_take(&sb);
+    if (!body) return 0;
+
+    int st = sb_call("POST", "/month_rates?on_conflict=month", body);
+    free(body);
+    if (st < 200 || st > 299)
+        fprintf(stderr, "[supabase] month rate %s -> HTTP %d\n", month_tab, st);
+    return st;
+}
+
+int sb_time_amount_set(const char *month_tab, int day, const char *amount) {
+    if (!sb_on || !month_tab || !*month_tab || day < 1 || day > 31) return 0;
+    if (!amount || !num_is_valid(amount)) return 0;
+
+    char *em = url_encode(month_tab);
+    if (!em) return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "/time_entries?month=eq.%s&day=eq.%d", em, day);
+    free(em);
+
+    char body[128];
+    snprintf(body, sizeof(body), "{\"amount\":%s}", amount);
+    int st = sb_call("PATCH", path, body);
+    if (st < 200 || st > 299)
+        fprintf(stderr, "[supabase] amount %s day=%d -> HTTP %d\n",
+                month_tab, day, st);
+    return st;
+}
+
 /* ================= Напоминания бота ================= */
 
 static void sb_epoch_iso(long long t, char *out, size_t cap) {

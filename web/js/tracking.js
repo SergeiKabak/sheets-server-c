@@ -27,7 +27,9 @@
       /* устаревший ответ — пользователь уже переключил месяц */
       if (!d || !d.ok || S.trkSelectedMonth !== month) return;
       S.TRK = d.days || {};
-      S.TRK_META = { month: d.month || '', label: d.label || month, today: d.today || '' };
+      S.TRK_META = { month: d.month || '', label: d.label || month,
+                     today: d.today || '', rate: d.rate || '' };
+      setRateInput(d.rate);
       A.calendar.renderTracking();
     });
   }
@@ -43,6 +45,49 @@
       }
     }
     return s;
+  }
+
+  /* ---------- ставка за час на выбранный месяц ---------- */
+  function rateInput() {
+    return document.getElementById('trk-rate');
+  }
+
+  /* Показываем ставку месяца; не мешаем, если пользователь её сейчас правит. */
+  function setRateInput(rate) {
+    var el = rateInput();
+    if (!el || document.activeElement === el) return;
+    el.value = (rate === undefined || rate === null || rate === '') ? '' : String(rate);
+  }
+
+  function saveRate() {
+    var el = rateInput(), b = document.getElementById('trk-rate-save');
+    if (!el) return;
+    var raw = String(el.value || '').replace(',', '.').trim();
+    var v = parseFloat(raw);
+    if (!isFinite(v) || v <= 0) {
+      trkMsg('Ставка должна быть числом больше 0', false);
+      return;
+    }
+    var month = S.trkSelectedMonth || S.M[S.cur] || '';
+    if (!month) { trkMsg('Не выбран месяц', false); return; }
+
+    if (b) b.disabled = true;
+    trkMsg('Сохраняем ставку...', true);
+    A.api.setRate(month, raw).then(function (d) {
+      if (b) b.disabled = false;
+      if (d && d.ok) {
+        S.TRK_META.rate = d.rate || raw;
+        setRateInput(d.rate || raw);
+        var msg = 'Ставка за ' + month + ': ' + (d.rate || raw) + ' ₽/час.';
+        if (d.days_updated !== undefined && d.days_updated !== null)
+          msg += ' Суммы пересчитаны: ' + d.days_updated + ' дн.';
+        trkMsg(msg, true);
+        loadTracking(month);      /* суммы дней придут уже новыми */
+      } else {
+        trkMsg('Не удалось сохранить ставку: ' +
+               ((d && d.error) || 'ошибка'), false);
+      }
+    });
   }
 
   /* ---------- тап по дню ----------
@@ -191,6 +236,7 @@
     var b1 = document.getElementById('trk-in'),
         b2 = document.getElementById('trk-out'),
         bm = document.getElementById('trk-money'),
+        rs = document.getElementById('trk-rate-save'),
         sv = document.getElementById('trk-modal-save'),
         cn = document.getElementById('trk-modal-cancel'),
         es = document.getElementById('trk-modal-erase'),
@@ -200,6 +246,7 @@
     if (cn) cn.onclick = closeTrkDialog;
     if (es) es.onclick = eraseTrkDialog;
     if (md) md.onclick = function (e) { if (e.target === md) closeTrkDialog(); };
+    if (rs) rs.onclick = saveRate;
     if (b1) b1.onclick = function () {
       b1.disabled = true; trkMsg('Сохраняем...', true);
       clock('in', function () { b1.disabled = false; });
@@ -215,6 +262,8 @@
     trkMsg: trkMsg,
     loadTracking: loadTracking,
     monthSum: monthSum,
+    setRateInput: setRateInput,
+    saveRate: saveRate,
     dayAction: dayAction,
     openTrkDialog: openTrkDialog,
     closeTrkDialog: closeTrkDialog,

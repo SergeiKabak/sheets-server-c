@@ -108,10 +108,13 @@
     var tk = d.trk;
     if (tk && tk.ok) {
       S.TRK = tk.days || {};
-      S.TRK_META = { month: tk.month || '', label: tk.label || S.trkSelectedMonth, today: tk.today || '' };
+      S.TRK_META = { month: tk.month || '', label: tk.label || S.trkSelectedMonth,
+                     today: tk.today || '', rate: tk.rate || '' };
+      A.tracking.setRateInput(tk.rate);
       renderTracking();
     } else {
-      S.TRK = {}; S.TRK_META = { month: '', label: '', today: '' };
+      S.TRK = {}; S.TRK_META = { month: '', label: '', today: '', rate: '' };
+      A.tracking.setRateInput('');
       A.tracking.loadTracking(S.trkSelectedMonth);
     }
   }

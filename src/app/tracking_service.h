@@ -87,6 +87,20 @@ int tracking_ensure_month(TrackingService *svc, const char *month,
 int tracking_do_clock(TrackingService *svc, const char *action,
                        char *out, size_t cap);
 
+/* Ставка за час выбранного месяца (GET /api/tracking/rate).
+ * month — "Октябрь 2026" или "10.2026"; NULL — текущий месяц.
+ * В out: {"ok":true,"month":"10.2026","rate":"500.00","source":"month"|"default"}.
+ * Возвращает HTTP-код (200/400/500). */
+int tracking_month_rate_get(TrackingService *svc, const char *month,
+                            char *out, size_t cap);
+
+/* Сохраняет ставку месяца и пересчитывает суммы всех отмеченных дней
+ * этого месяца (POST /api/tracking/rate). rate — строка с числом
+ * ("600", "600,50"). В out: {"ok":true,"month":"10.2026","rate":"600.00",
+ * "days_updated":N}. Возвращает HTTP-код (200/400/500/503). */
+int tracking_month_rate_set(TrackingService *svc, const char *month,
+                            const char *rate, char *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

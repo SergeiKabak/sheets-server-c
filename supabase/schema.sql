@@ -55,9 +55,18 @@ create table if not exists time_entries (
   primary key (month, day)
 );
 
+-- Ставка за час на каждый месяц (Mini App: «Ставка за час»).
+-- Нет строки — действует HOURLY_RATE из окружения.
+create table if not exists month_rates (
+  month      text primary key,                -- '10.2026'
+  rate       numeric not null check (rate > 0),
+  updated_at timestamptz not null default now()
+);
+
 -- RLS: закрыть всё, кроме service_role (он обходит RLS).
 -- Анонимный ключ из Mini App в коде не используется и доступа не получит.
 alter table schedule     enable row level security;
 alter table month_meta   enable row level security;
 alter table sync_log     enable row level security;
 alter table time_entries enable row level security;
+alter table month_rates  enable row level security;

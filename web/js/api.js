@@ -44,6 +44,15 @@
       return json('/api/tracking/days' + q({ month: month }));
     },
 
+    trackingRate: function (month) {
+      return json('/api/tracking/rate' + q({ month: month }));
+    },
+
+    setRate: function (month, rate) {
+      return json('/api/tracking/rate' + q({ month: month, rate: rate }),
+                  { method: 'POST' });
+    },
+
     clock: function (action) {
       return json('/api/tracking/clock' + q({ action: action }), { method: 'POST' });
     },

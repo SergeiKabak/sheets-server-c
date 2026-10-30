@@ -51,6 +51,18 @@ async function main() {
         text: () => Promise.resolve(JSON.stringify({ ok: true }))
       });
     }
+    if (url.indexOf('/api/tracking/rate') >= 0) {
+      const m = url.match(/[?&]rate=([^&]*)/);
+      const raw = m ? decodeURIComponent(m[1]).replace(',', '.') : '500';
+      const v = parseFloat(raw);
+      const rate = isFinite(v) ? v.toFixed(2) : raw;
+      return Promise.resolve({
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify({
+          ok: true, month: '10.2026', rate: rate, days_updated: 1
+        }))
+      });
+    }
     if (url.indexOf('/api/cabinet') >= 0) {
       // мок сервера: фильтрация коллег по пересечению смен (как в find_cabinet_colleagues)
       const all = [{ name: 'Яновская Юлия Алексеевна', shift: '8:00-14:30' },
@@ -117,6 +129,7 @@ async function main() {
   APP.calendar.showTable({
     t: 'Октябрь 2026', s1, s2,
     trk: { ok: true, month: '10.2026', label: 'Октябрь 2026', today: '05.10.2026',
+           rate: '500.00',
            days: { 2: { in: '07:30', out: '14:40', hours: '6.5', sum: '650.00' } } }
   });
 
@@ -234,6 +247,30 @@ async function main() {
   click(document.getElementById('trk-money'));
   ok(!cal.classList.contains('show-sum'), 'повторный тап скрывает суммы');
   ok(st.style.display === 'none', 'при выключении баннер прячется (итог виден в инфоблоке)');
+
+  // --- ставка за час на выбранный месяц ---
+  const rateEl = document.getElementById('trk-rate');
+  ok(!!rateEl && rateEl.value === '500.00',
+     'поле ставки показывает ставку месяца: ' + (rateEl && rateEl.value));
+
+  window.__fetches = [];
+  rateEl.value = '0';
+  document.getElementById('trk-rate-save').click();
+  ok(/больше 0/.test(st.textContent), 'нулевая ставка отклоняется');
+  ok(!window.__fetches.some(u => /\/api\/tracking\/rate/.test(u)),
+     'при неверной ставке запроса нет');
+
+  window.__fetches = [];
+  rateEl.value = '600';
+  document.getElementById('trk-rate-save').click();
+  await tick();
+  ok(window.__fetches.some(u => /\/api\/tracking\/rate\?/.test(u) &&
+                                /rate=600/.test(u) && /\[POST\]/.test(u)),
+     'сохранение ставки -> POST /api/tracking/rate?rate=600: ' +
+     decodeURIComponent(window.__fetches[0] || ''));
+  ok(/Ставка за/.test(st.textContent) && /600\.00/.test(st.textContent) &&
+     /1 дн/.test(st.textContent),
+     'баннер подтверждает ставку и пересчёт: ' + st.textContent);
 
   // --- удаление отметки дня: открыть диалог правки и нажать «Удалить» ---
   click(cell(2));

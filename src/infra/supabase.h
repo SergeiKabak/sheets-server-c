@@ -74,6 +74,19 @@ int sb_time_day_read(const char *month_tab, int day,
                      char *hours, size_t hcap,
                      char *sum, size_t scap);
 
+/* Ставка за час на месяц (таблица month_rates).
+   0 — ставка есть (в *rate), 1 — для месяца ставка не задана,
+   -1 — БД недоступна/ошибка. */
+int sb_month_rate_get(const char *month_tab, double *rate);
+
+/* Сохраняет ставку месяца (upsert по month). Возвращает HTTP-код
+   (2xx — успех), 0 — выключено/сетевая ошибка/неверные аргументы. */
+int sb_month_rate_set(const char *month_tab, const char *rate);
+
+/* Пересчёт суммы одного дня при смене ставки месяца:
+   PATCH amount для строки (month, day). HTTP-код, 0 — ошибка. */
+int sb_time_amount_set(const char *month_tab, int day, const char *amount);
+
 /* ---------- напоминания бота ---------- */
 
 #define SB_REMINDER_TEXT 512

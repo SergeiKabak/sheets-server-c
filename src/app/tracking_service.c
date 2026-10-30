@@ -43,8 +43,18 @@ static void trk_log(const char *fmt, ...) {
     va_end(ap);
 }
 
-/* Ставка в час (HOURLY_RATE). */
-static double employee_rate(const TrackingService *svc) {
+/* Ставка за час для месяца: явная из month_rates, иначе HOURLY_RATE.
+ * explicit_out (может быть NULL) = 1, если для месяца ставка задана явно
+ * (тогда её можно перезаписывать в колонку E листа). */
+static double month_rate_ex(const TrackingService *svc, const char *tab,
+                            int *explicit_out) {
+    double r = 0;
+    int ex = 0;
+    if (svc && tab && *tab && sb_enabled() &&
+        sb_month_rate_get(tab, &r) == 0 && r > 0)
+        ex = 1;
+    if (explicit_out) *explicit_out = ex;
+    if (ex) return r;
     return svc ? svc->rate : 0.0;
 }
 
@@ -148,12 +158,14 @@ static int tracking_days_from_db(TrackingService *svc, const char *month,
     char today[32], label[128];
     clock_datetime(svc->tz_offset, today, sizeof(today), NULL, 0);
     tracking_month_label(tab, label, sizeof(label));
+    char rate_buf[32];
+    num_format2(month_rate_ex(svc, tab, NULL), rate_buf, sizeof(rate_buf));
     char *em = json_escape(tab);
     char *el = json_escape(label);
     int n = snprintf(out, cap,
                      "{\"ok\":true,\"month\":\"%s\",\"label\":\"%s\","
-                     "\"today\":\"%s\",\"days\":%s}",
-                     em ? em : "", el ? el : "", today, days);
+                     "\"today\":\"%s\",\"rate\":\"%s\",\"days\":%s}",
+                     em ? em : "", el ? el : "", today, rate_buf, days);
     free(em);
     free(el);
     return (n > 0 && (size_t)n < cap) ? 0 : -1;
@@ -188,6 +200,8 @@ static int tracking_days_build(TrackingService *svc, const char *month,
 
     char label[128];
     tracking_month_label(tab, label, sizeof(label));
+    char rate_buf[32];
+    num_format2(month_rate_ex(svc, tab, NULL), rate_buf, sizeof(rate_buf));
 
     StrBuf sb;
     sbuf_init(&sb);
@@ -197,6 +211,8 @@ static int tracking_days_build(TrackingService *svc, const char *month,
     sbuf_append_json_string(&sb, label);
     sbuf_append(&sb, ",\"today\":");
     sbuf_append_json_string(&sb, today);
+    sbuf_append(&sb, ",\"rate\":");
+    sbuf_append_json_string(&sb, rate_buf);
     sbuf_append(&sb, ",\"days\":{");
 
     int first = 1;
@@ -262,12 +278,14 @@ static int tracking_days_empty(TrackingService *svc, const char *month,
     char today[32], label[128];
     clock_datetime(svc->tz_offset, today, sizeof(today), NULL, 0);
     tracking_month_label(tab, label, sizeof(label));
+    char rate_buf[32];
+    num_format2(month_rate_ex(svc, tab, NULL), rate_buf, sizeof(rate_buf));
     char *em = json_escape(tab);
     char *el = json_escape(label);
     int n = snprintf(out, cap,
         "{\"ok\":true,\"month\":\"%s\",\"label\":\"%s\","
-        "\"today\":\"%s\",\"days\":{}}",
-        em ? em : "", el ? el : "", today);
+        "\"today\":\"%s\",\"rate\":\"%s\",\"days\":{}}",
+        em ? em : "", el ? el : "", today, rate_buf);
     free(em); free(el);
     return (n > 0 && (size_t)n < cap) ? 200 : 500;
 }
@@ -400,6 +418,9 @@ int tracking_do_clock(TrackingService *svc, const char *action, char *out, size_
     clock_month_tab(svc->tz_offset, svc->current_tab, sizeof(svc->current_tab));
     int day = atoi(date);   /* "05.10.2026" -> 5 */
 
+    int rate_explicit = 0;
+    double rate = month_rate_ex(svc, svc->current_tab, &rate_explicit);
+
     /* ==== БД — первоисточник: запись сразу в time_entries ==== */
     if (sb_enabled()) {
         char d_in[16] = "", d_out[16] = "";
@@ -433,7 +454,7 @@ int tracking_do_clock(TrackingService *svc, const char *action, char *out, size_
             } else {
                 double hours = time_entry_hours(d_in, time_s);
                 num_format2(hours, hours_buf, sizeof(hours_buf));
-                num_format2(time_entry_sum(hours_buf, employee_rate(svc)),
+                num_format2(time_entry_sum(hours_buf, rate),
                             sum_buf, sizeof(sum_buf));
                 int st = sb_time_upsert(svc->current_tab, day, d_in, time_s,
                                         hours_buf, sum_buf);
@@ -509,11 +530,11 @@ int tracking_do_clock(TrackingService *svc, const char *action, char *out, size_
             goto finish;
         }
         char rate_buf[32];
-        num_format2(employee_rate(svc), rate_buf, sizeof(rate_buf));
+        num_format2(rate, rate_buf, sizeof(rate_buf));
 
         if (date_row >= 0) {
             sheet_row_set(&rows.row[date_row], 1, time_s);
-            if (!*sheet_row_get(&rows.row[date_row], 4))
+            if (rate_explicit || !*sheet_row_get(&rows.row[date_row], 4))
                 sheet_row_set(&rows.row[date_row], 4, rate_buf);
         } else if (block >= 0) {
             int last = sheet_find_block_end(&rows, block);
@@ -563,17 +584,23 @@ int tracking_do_clock(TrackingService *svc, const char *action, char *out, size_
         double hours = time_entry_hours(sheet_row_get(&rows.row[date_row], 1), time_s);
         char hours_buf[32], sum_buf[32];
         num_format2(hours, hours_buf, sizeof(hours_buf));
-        double rate = num_parse(sheet_row_get(&rows.row[date_row], 4));
+        /* Явная ставка месяца важнее колонки E; иначе — прежнее поведение
+           (ставка из строки листа, а если её нет — HOURLY_RATE). */
+        double day_rate = rate;
+        if (!rate_explicit) {
+            double sheet_rate = num_parse(sheet_row_get(&rows.row[date_row], 4));
+            if (sheet_rate > 0) day_rate = sheet_rate;
+        }
         /* Считаем сумму из тех же округлённых часов, что показываем пользователю,
            чтобы не было расхождения (например, 5.02 × 14.2 = 71.28, а не 71.24). */
-        num_format2(time_entry_sum(hours_buf, rate), sum_buf, sizeof(sum_buf));
+        num_format2(time_entry_sum(hours_buf, day_rate), sum_buf, sizeof(sum_buf));
 
         /* Статичные значения вместо формул: */
         sheet_row_set(&rows.row[date_row], 3, hours_buf);   /* D — часы */
         sheet_row_set(&rows.row[date_row], 5, sum_buf);     /* F — сумма */
-        if (!*sheet_row_get(&rows.row[date_row], 4)) {
+        if (rate_explicit || !*sheet_row_get(&rows.row[date_row], 4)) {
             char rb[32];
-            num_format2(rate, rb, sizeof(rb));
+            num_format2(day_rate, rb, sizeof(rb));
             sheet_row_set(&rows.row[date_row], 4, rb);
         }
 
@@ -669,18 +696,21 @@ int tracking_fill_day(TrackingService *svc, const char *month, int day,
         return 500;
     }
 
+    int rate_explicit = 0;
+    double rate = month_rate_ex(svc, tab, &rate_explicit);
+
     SheetRows rows;
     sheet_rows_init(&rows);
     int code = 200;
 
     /* ==== БД — первоисточник: запись/ПРАВКА сразу в time_entries ==== */
     if (sb_enabled()) {
-        /* ставка — из окружения: лист больше не первоисточник */
+        /* ставка месяца — из month_rates, иначе HOURLY_RATE */
         double hours = (out_min - in_min) / 60.0;
         if (hours < 0) hours += 24.0;
         char hours_buf[32], sum_buf[32];
         num_format2(hours, hours_buf, sizeof(hours_buf));
-        num_format2(time_entry_sum(hours_buf, employee_rate(svc)),
+        num_format2(time_entry_sum(hours_buf, rate),
                     sum_buf, sizeof(sum_buf));
 
         /* UPSERT перезаписывает существующий день — это и есть правка
@@ -751,20 +781,24 @@ int tracking_fill_day(TrackingService *svc, const char *month, int day,
     sheet_row_set(&rows.row[row], 2, norm_out);
 
     char rate_buf[32];
-    if (!*sheet_row_get(&rows.row[row], 4)) {
-        num_format2(employee_rate(svc), rate_buf, sizeof(rate_buf));
-        sheet_row_set(&rows.row[row], 4, rate_buf);
-    } else {
-        snprintf(rate_buf, sizeof(rate_buf), "%s", sheet_row_get(&rows.row[row], 4));
+    double day_rate = rate;
+    if (!rate_explicit) {
+        const char *sheet_rate = sheet_row_get(&rows.row[row], 4);
+        if (sheet_rate && *sheet_rate) {
+            double parsed = num_parse(sheet_rate);
+            if (parsed > 0) day_rate = parsed;
+        }
     }
-    double rate = num_parse(rate_buf);
+    num_format2(day_rate, rate_buf, sizeof(rate_buf));
+    if (rate_explicit || !*sheet_row_get(&rows.row[row], 4))
+        sheet_row_set(&rows.row[row], 4, rate_buf);
 
     double hours = (out_min - in_min) / 60.0;
     if (hours < 0) hours += 24.0;
     char hours_buf[32], sum_buf[32];
     num_format2(hours, hours_buf, sizeof(hours_buf));
     /* Сумма из округлённых часов — как в «Пришла/Ушла», без расхождений. */
-    num_format2(time_entry_sum(hours_buf, rate), sum_buf, sizeof(sum_buf));
+    num_format2(time_entry_sum(hours_buf, day_rate), sum_buf, sizeof(sum_buf));
 
     sheet_row_set(&rows.row[row], 3, hours_buf);
     sheet_row_set(&rows.row[row], 5, sum_buf);
@@ -875,11 +909,178 @@ int tracking_erase_day(TrackingService *svc, const char *month, int day,
 }
 
 /* ================================================================
+ *  Ставка за час на месяц
+ * ================================================================ */
+
+/* Вкладка месяца для API ставки: пустой month -> текущий месяц. */
+static int rate_month_tab(TrackingService *svc, const char *month,
+                          char *tab, size_t cap) {
+    if (month && *month)
+        return month_tab_and_parts(svc, month, tab, cap, NULL, NULL);
+    clock_month_tab(svc->tz_offset, tab, cap);
+    return (tab && tab[0]) ? 0 : -1;
+}
+
+/* Разбор ставки из строки: "600", "600.50", "600,50".
+   0 — успех; -1 — не число или вне допустимого диапазона. */
+static int rate_parse(const char *s, double *out) {
+    if (!s || !*s || !out) return -1;
+    size_t n = strlen(s);
+    if (n >= 64) return -1;
+    char norm[64];
+    int dots = 0, digits = 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (c == ',') c = '.';
+        if (c == '.') {
+            if (++dots > 1) return -1;
+        } else if (c >= '0' && c <= '9') {
+            digits++;
+        } else {
+            return -1;
+        }
+        norm[i] = c;
+    }
+    norm[n] = '\0';
+    if (!digits) return -1;
+    double v = atof(norm);
+    if (!(v > 0) || v > 1000000.0) return -1;
+    *out = v;
+    return 0;
+}
+
+/* Пересчитывает amount всех отмеченных дней месяца по новой ставке.
+   0 — успех (updated — сколько строк обновлено), -1 — ошибка БД. */
+static int recalc_month_amounts(TrackingService *svc, const char *tab,
+                                double rate, int *updated) {
+    (void)svc;
+    if (updated) *updated = 0;
+    if (!sb_enabled() || !tab || !*tab) return -1;
+
+    char *et = url_encode(tab);
+    if (!et) return -1;
+    char path[512];
+    snprintf(path, sizeof(path),
+             "/time_entries?month=eq.%s&select=day,hours&order=day", et);
+    free(et);
+
+    int st = 0;
+    char *body = sb_get(path, &st);
+    if (!body || st < 200 || st > 299) { free(body); return -1; }
+    cJSON *arr = cJSON_Parse(body);
+    free(body);
+    if (!cJSON_IsArray(arr)) { cJSON_Delete(arr); return -1; }
+
+    int ok = 0, failed = 0;
+    cJSON *it = NULL;
+    cJSON_ArrayForEach(it, arr) {
+        cJSON *jd = cJSON_GetObjectItemCaseSensitive(it, "day");
+        cJSON *jh = cJSON_GetObjectItemCaseSensitive(it, "hours");
+        if (!cJSON_IsNumber(jd)) continue;
+        int day = (int)jd->valuedouble;
+        if (day < 1 || day > 31) continue;
+
+        char hours_buf[32] = "";
+        if (cJSON_IsNumber(jh))
+            num_format2(jh->valuedouble, hours_buf, sizeof(hours_buf));
+        else if (cJSON_IsString(jh) && jh->valuestring)
+            snprintf(hours_buf, sizeof(hours_buf), "%s", jh->valuestring);
+        if (!num_is_valid(hours_buf)) continue;
+
+        char sum_buf[32];
+        num_format2(time_entry_sum(hours_buf, rate), sum_buf, sizeof(sum_buf));
+        int st2 = sb_time_amount_set(tab, day, sum_buf);
+        if (st2 >= 200 && st2 < 300) ok++;
+        else failed++;
+    }
+    cJSON_Delete(arr);
+    if (updated) *updated = ok;
+    return failed ? -1 : 0;
+}
+
+int tracking_month_rate_get(TrackingService *svc, const char *month,
+                            char *out, size_t cap) {
+    if (!out || cap < 128) return 500;
+    out[0] = '\0';
+
+    char tab[64];
+    if (rate_month_tab(svc, month, tab, sizeof(tab)) != 0) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный месяц\"}");
+        return 400;
+    }
+
+    int explicit_rate = 0;
+    double rate = month_rate_ex(svc, tab, &explicit_rate);
+    char rate_buf[32];
+    num_format2(rate, rate_buf, sizeof(rate_buf));
+    snprintf(out, cap,
+             "{\"ok\":true,\"month\":\"%s\",\"rate\":\"%s\",\"source\":\"%s\"}",
+             tab, rate_buf, explicit_rate ? "month" : "default");
+    return 200;
+}
+
+int tracking_month_rate_set(TrackingService *svc, const char *month,
+                            const char *rate, char *out, size_t cap) {
+    if (!out || cap < 128) return 500;
+    out[0] = '\0';
+
+    char tab[64];
+    if (rate_month_tab(svc, month, tab, sizeof(tab)) != 0) {
+        snprintf(out, cap, "{\"ok\":false,\"error\":\"неверный месяц\"}");
+        return 400;
+    }
+
+    double value = 0;
+    if (rate_parse(rate, &value) != 0) {
+        snprintf(out, cap,
+                 "{\"ok\":false,\"error\":\"ставка должна быть числом больше 0\"}");
+        return 400;
+    }
+    char rate_buf[32];
+    num_format2(value, rate_buf, sizeof(rate_buf));
+
+    if (!sb_enabled()) {
+        snprintf(out, cap,
+                 "{\"ok\":false,\"error\":\"БД недоступна: ставка хранится в Supabase\"}");
+        return 503;
+    }
+    int st = sb_month_rate_set(tab, rate_buf);
+    if (st == 404) {
+        snprintf(out, cap,
+                 "{\"ok\":false,\"error\":\"таблица month_rates не создана: "
+                 "выполните docs/sql/month_rates.sql в Supabase SQL Editor\"}");
+        return 503;
+    }
+    if (st < 200 || st > 299) {
+        snprintf(out, cap,
+                 "{\"ok\":false,\"error\":\"не удалось сохранить ставку\"}");
+        return 500;
+    }
+
+    int updated = 0;
+    if (recalc_month_amounts(svc, tab, value, &updated) != 0) {
+        snprintf(out, cap,
+                 "{\"ok\":false,\"error\":\"ставка сохранена, но суммы "
+                 "пересчитать не удалось — попробуйте ещё раз\"}");
+        return 500;
+    }
+
+    trk_dirty_put(tab);          /* выгрузка в Google — фоном */
+    trk_cache_invalidate(tab);   /* Mini App увидит новые суммы сразу */
+    snprintf(out, cap,
+             "{\"ok\":true,\"month\":\"%s\",\"rate\":\"%s\",\"days_updated\":%d}",
+             tab, rate_buf, updated);
+    trk_log("RATE: %s = %s (days=%d)", tab, rate_buf, updated);
+    return 200;
+}
+
+/* ================================================================
  *  Выгрузка БД -> Google Sheets (БД — первоисточник, Google — архив)
  * ================================================================ */
 
 /* Выгружает месяц: строки СВОЕГО блока берутся из time_entries —
-   новые вставляются, пропавшие очищаются (ставку в колонке E не трогаем).
+   новые вставляются, пропавшие очищаются. Явная ставка месяца
+   записывается в E всех строк-дней; если её нет — E не трогаем.
    0 — успех; dirty-флаг снимается только при успехе. */
 static int tracking_push_month(TrackingService *svc, const char *tab,
                                 char *err, size_t errcap) {
@@ -951,8 +1152,10 @@ static int tracking_push_month(TrackingService *svc, const char *tab,
     }
 
     int have_day[32] = { 0 };
+    int rate_explicit = 0;
+    double rate = month_rate_ex(svc, tab, &rate_explicit);
     char rate_buf[32];
-    num_format2(employee_rate(svc), rate_buf, sizeof(rate_buf));
+    num_format2(rate, rate_buf, sizeof(rate_buf));
 
     /* 2) строки-дни из БД -> в лист */
     cJSON *it = NULL;
@@ -985,7 +1188,7 @@ static int tracking_push_month(TrackingService *svc, const char *tab,
         sheet_row_set(&rows.row[row], 1, vin);
         sheet_row_set(&rows.row[row], 2, vout);
         sheet_row_set(&rows.row[row], 3, vh);
-        if (!*sheet_row_get(&rows.row[row], 4))
+        if (rate_explicit || !*sheet_row_get(&rows.row[row], 4))
             sheet_row_set(&rows.row[row], 4, rate_buf);
         sheet_row_set(&rows.row[row], 5, vs);
     }
@@ -1005,6 +1208,8 @@ static int tracking_push_month(TrackingService *svc, const char *tab,
             if (c == 4) continue;              /* E — ставка, не трогаем */
             sheet_row_set(&rows.row[i], c, "");
         }
+        if (rate_explicit)                     /* явная ставка месяца — во все дни */
+            sheet_row_set(&rows.row[i], 4, rate_buf);
     }
 
     if (write_rows(svc, tab, &rows) != 0) {

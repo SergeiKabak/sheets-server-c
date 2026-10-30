@@ -9,7 +9,7 @@
 
     /* отметки Time tracking: TRK[день] = {in,out,hours,sum} */
     TRK: {},
-    TRK_META: { month: '', label: '', today: '' },  /* month: «MM.YYYY» */
+    TRK_META: { month: '', label: '', today: '', rate: '' },  /* month: «MM.YYYY» */
     trkSelectedMonth: '',
 
     /* модалка ввода времени */

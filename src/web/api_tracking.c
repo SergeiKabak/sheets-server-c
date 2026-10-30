@@ -33,6 +33,20 @@ static void api_tracking_clock(AppContext *app, int fd, const char *query) {
     free(action);
 }
 
+/* GET  /api/tracking/rate?month=...       — ставка месяца
+   POST /api/tracking/rate?month=...&rate=600 — сохранить и пересчитать */
+static void api_tracking_rate(AppContext *app, int fd, const char *query) {
+    char *month = url_query_param(query, "month");
+    char *rate = url_query_param(query, "rate");
+    char out[1024];
+    int code = (rate && *rate)
+        ? tracking_month_rate_set(&app->tracking, month, rate, out, sizeof(out))
+        : tracking_month_rate_get(&app->tracking, month, out, sizeof(out));
+    http_reply_json(fd, status_for(code), out);
+    free(month);
+    free(rate);
+}
+
 /* GET /api/tracking/days?month=Октябрь 2026 — какие дни уже отмечены. */
 static void api_tracking_days(AppContext *app, int fd, const char *query) {
     char *month = url_query_param(query, "month");
@@ -347,6 +361,10 @@ void api_tracking_handle(AppContext *app, int fd, const char *method,
 
     if (strncmp(path, "/api/tracking/clock", 18) == 0) {
         api_tracking_clock(app, fd, path);
+        return;
+    }
+    if (strncmp(path, "/api/tracking/rate", 18) == 0) {
+        api_tracking_rate(app, fd, path);
         return;
     }
     if (strncmp(path, "/api/tracking/days", 18) == 0) {
