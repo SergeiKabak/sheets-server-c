@@ -43,6 +43,14 @@ static void trk_log(const char *fmt, ...) {
     va_end(ap);
 }
 
+/* Округление до двух знаков — так же, как печатает num_format2:
+   в расчёте участвует ровно та ставка, что видна пользователю. */
+static double round2(double v) {
+    char b[32];
+    num_format2(v, b, sizeof(b));
+    return num_parse(b);
+}
+
 /* Ставка за час для месяца: явная из month_rates, иначе HOURLY_RATE.
  * explicit_out (может быть NULL) = 1, если для месяца ставка задана явно
  * (тогда её можно перезаписывать в колонку E листа). */
@@ -54,8 +62,8 @@ static double month_rate_ex(const TrackingService *svc, const char *tab,
         sb_month_rate_get(tab, &r) == 0 && r > 0)
         ex = 1;
     if (explicit_out) *explicit_out = ex;
-    if (ex) return r;
-    return svc ? svc->rate : 0.0;
+    if (ex) return round2(r);
+    return svc ? round2(svc->rate) : 0.0;
 }
 
 /* Имя вкладки по названию месяца ("Октябрь 2026" -> "10.2026").
@@ -922,27 +930,14 @@ static int rate_month_tab(TrackingService *svc, const char *month,
 }
 
 /* Разбор ставки из строки: "600", "600.50", "600,50".
+   Округляется до двух знаков (14.805 -> 14.81).
    0 — успех; -1 — не число или вне допустимого диапазона. */
 static int rate_parse(const char *s, double *out) {
     if (!s || !*s || !out) return -1;
     size_t n = strlen(s);
     if (n >= 64) return -1;
     char norm[64];
-    int dots = 0, digits = 0;
-    for (size_t i = 0; i < n; i++) {
-        char c = s[i];
-        if (c == ',') c = '.';
-        if (c == '.') {
-            if (++dots > 1) return -1;
-        } else if (c >= '0' && c <= '9') {
-            digits++;
-        } else {
-            return -1;
-        }
-        norm[i] = c;
-    }
-    norm[n] = '\0';
-    if (!digits) return -1;
+    if (num_round2_text(s, norm, sizeof(norm)) != 0) return -1;
     double v = atof(norm);
     if (!(v > 0) || v > 1000000.0) return -1;
     *out = v;

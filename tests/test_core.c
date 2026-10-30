@@ -142,6 +142,17 @@ static void test_num(void) {
     char buf[32];
     num_format2(7.1666, buf, sizeof(buf));
     check(!strcmp(buf, "7.17"), "num_format2: два знака");
+
+    check(num_round2_text("14.805", buf, sizeof(buf)) == 0 && !strcmp(buf, "14.81"),
+          "num_round2_text: половина вверх");
+    check(num_round2_text("600", buf, sizeof(buf)) == 0 && !strcmp(buf, "600.00"),
+          "num_round2_text: целое -> два знака");
+    check(num_round2_text("0,5", buf, sizeof(buf)) == 0 && !strcmp(buf, "0.50"),
+          "num_round2_text: запятая");
+    check(num_round2_text("1.999", buf, sizeof(buf)) == 0 && !strcmp(buf, "2.00"),
+          "num_round2_text: перенос в целую часть");
+    check(num_round2_text("abc", buf, sizeof(buf)) == -1,
+          "num_round2_text: мусор отклонён");
 }
 
 static void test_strbuf(void) {
@@ -224,6 +235,11 @@ static void test_time_entry(void) {
     num_format2(time_entry_sum("5.02", 14.2), sum_buf, sizeof(sum_buf));
     check(!strcmp(sum_buf, "71.28"),
           "time_entry_sum: сумма считается от округлённых часов");
+    num_format2(time_entry_sum("6.05", 15.5), sum_buf, sizeof(sum_buf));
+    check(!strcmp(sum_buf, "93.78"),
+          "time_entry_sum: половина копейки — вверх (93.775 -> 93.78)");
+    num_format2(time_entry_sum("11.58", 15.0), sum_buf, sizeof(sum_buf));
+    check(!strcmp(sum_buf, "173.70"), "time_entry_sum: ровно два знака");
 
     char days[256];
     check(time_entry_days_json("[{\"day\":5,\"t_in\":\"07:30\",\"t_out\":\"14:40\","

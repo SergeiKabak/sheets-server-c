@@ -6,6 +6,7 @@
 #include "core/num.h"
 #include "core/strbuf.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,5 +74,13 @@ double time_entry_hours(const char *in_time, const char *out_time) {
 }
 
 double time_entry_sum(const char *hours, double rate) {
-    return num_parse(hours) * rate;
+    /* Деньги считаем в копейках, чтобы результат всегда был ровно
+       с двумя знаками (округление половины вверх):
+       часы(2 знака) × ставка(2 знака) = 4 знака -> копейки. */
+    long long h2 = llround(num_parse(hours) * 100.0);
+    long long r2 = llround(rate * 100.0);
+    if (h2 < 0) h2 = 0;
+    if (r2 < 0) r2 = 0;
+    long long cents = (h2 * r2 + 50) / 100;
+    return (double)cents / 100.0;
 }
