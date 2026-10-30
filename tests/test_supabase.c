@@ -202,6 +202,12 @@ int main(void) {
     assert(sb_time_amount_set("10.2026", 5, "abc") == 0);
     assert(sb_time_amount_set("10.2026", 5, "100.00") == 0);
 
+    /* напоминания: удаление по видам и чистка журнала — без падения */
+    assert(sb_reminder_cancel_kinds(NULL) == 0);
+    assert(sb_reminder_cancel_kinds("") == 0);
+    assert(sb_reminder_cancel_kinds("shift_missing") == 0);
+    assert(sb_reminder_purge_sent(0) == 0);
+
     /* ---------- Диагностика: недоступная база -> ok:false, без падения ---------- */
     {
         const char *ms[2] = { "Октябрь 2026", "Ноябрь 2026" };

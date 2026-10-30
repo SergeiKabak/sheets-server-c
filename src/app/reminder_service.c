@@ -118,6 +118,25 @@ int reminders_materialize(const AppConfig *cfg, const TrackingService *svc,
     long long day_start = local_now - local_now % 86400 - tz;  /* UTC-начало суток */
     int added = 0;
 
+    /* Что уже отмечено сегодня. Если приход/уход есть, соответствующие
+       напоминания не создаём вовсе — иначе они «висят» в таблице до
+       отправки, хотя уже не нужны. */
+    int has_in = 0, has_out = 0;
+    {
+        time_t t = (time_t)(day_start + tz);
+        struct tm tmv;
+        gmtime_r(&t, &tmv);
+        char tab[32];
+        snprintf(tab, sizeof(tab), "%02d.%04d", tmv.tm_mon + 1,
+                 tmv.tm_year + 1900);
+        char ti[16] = "", to[16] = "";
+        if (sb_time_day_read(tab, tmv.tm_mday, ti, sizeof(ti), to, sizeof(to),
+                             NULL, 0, NULL, 0) == 0) {
+            has_in = (ti[0] != '\0');
+            has_out = (to[0] != '\0');
+        }
+    }
+
     for (int i = 0; i < nc; i++) {
         ReminderSlot slots[REMINDER_SLOTS_MAX];
         int ns = reminder_day_slots(now, tz, months, count,
@@ -136,6 +155,13 @@ int reminders_materialize(const AppConfig *cfg, const TrackingService *svc,
                                    (int)(sizeof(have) / sizeof(have[0])));
 
         for (int j = 0; j < ns; j++) {
+            const char *kind = slots[j].kind;
+            /* Уход отмечен — авто-напоминания не нужны; приход отмечен —
+               не нужны «пора на смену» и «нет прихода». */
+            if (has_out) continue;
+            if (has_in && (strcmp(kind, "shift_start") == 0 ||
+                           strcmp(kind, "shift_missing") == 0)) continue;
+
             int dup = 0;
             for (int k = 0; k < nh; k++) {
                 if (have[k] == slots[j].at) { dup = 1; break; }

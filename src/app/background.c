@@ -143,6 +143,10 @@ void background_run(AppContext *app) {
                     titles[nt++] = months[i2].title;
                 int pushed = tracking_push_all(&app->tracking, titles, nt);
                 fprintf(stderr, "[sync] google push months: %d\n", pushed);
+
+                /* Журнал напоминаний: отправленные строки старше 3 дней
+                   больше не нужны — иначе таблица растёт без предела. */
+                sb_reminder_purge_sent(time(NULL) - 3 * 86400);
             }
         }
 

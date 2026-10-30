@@ -89,15 +89,25 @@
   плюс `reminder_mark_present()` / `reminder_needs_no_mark()` — решение
   «есть ли уже нужная отметка». Покрыты `tests/test_reminders.c`.
 - `src/infra/supabase.c` — `sb_reminder_add_kind / due / times / mark_sent /
-  cancel / cancel_auto`, `sb_time_day_read`, `sb_sub_set / sb_sub_get /
-  sb_sub_list` (PostgREST). `sb_reminder_times` отдаёт уже запланированные
-  на сегодня моменты, чтобы каждый тик не вставлять цепочку заново.
+  cancel / cancel_auto / cancel_kinds / purge_sent`, `sb_time_day_read`,
+  `sb_sub_set / sb_sub_get / sb_sub_list` (PostgREST). `sb_reminder_times`
+  отдаёт уже запланированные на сегодня моменты, чтобы каждый тик не
+  вставлять цепочку заново.
 - `src/app/reminder_service.c` — сохранение разовых, настройки режима
   (`reminder_settings_get/save`), раскладка сегодняшних напоминаний
   (`reminders_materialize`) и отправка (`reminders_flush`): для
   `shift_missing` и `shift_end` день перечитывается из БД, и при наличии
   нужной отметки напоминание снимается молча (`sent = true`, сообщение
-  не уходит).
+  не уходит). В `reminders_materialize` напоминания, «закрытые» уже
+  сделанной отметкой, не создаются вовсе.
+- Отметка закрывает свои напоминания сразу: как только «Пришла»/«Ушла»
+  записана в БД, tracking_service удаляет ещё не отправленные
+  авто-напоминания этого дня (`cancel_auto_reminders()` →
+  `sb_reminder_cancel_kinds`). Приход отмечен — снимается «пора на смену»
+  и цепочка «отметки прихода нет»; уход отмечен — вместе с ними цепочка
+  «не забудьте уйти». Отправленные строки старше 3 дней раз в сутки
+  удаляет `sb_reminder_purge_sent` (фоновый цикл), чтобы таблица
+  не росла без предела.
 - `src/app/bot_keyboards.h` — общие инлайн-кнопки «Пришла / Ушла»
   (`TRACK_INLINE_JSON`): их используют и меню учёта времени, и напоминание
   «отметки нет».

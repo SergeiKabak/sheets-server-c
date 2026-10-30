@@ -133,6 +133,18 @@ static int write_rows(TrackingService *svc, const char *tab, SheetRows *rows) {
     return rc;
 }
 
+/* После отметки ненужные авто-напоминания удаляем сразу, а не держим
+   в таблице до момента отправки: иначе за день копятся десятки «висящих»
+   строк (приход отмечен, а shift_missing всё ещё запланированы).
+   has_in/has_out — что уже отмечено за сегодня. */
+static void cancel_auto_reminders(int has_in, int has_out) {
+    if (!sb_enabled()) return;
+    if (has_out)
+        sb_reminder_cancel_kinds("shift_start,shift_missing,shift_end");
+    else if (has_in)
+        sb_reminder_cancel_kinds("shift_start,shift_missing");
+}
+
 /* ================================================================
  *  Отметки времени: БД -> кэш -> Google
  * ================================================================ */
@@ -471,6 +483,7 @@ int tracking_do_clock(TrackingService *svc, const char *action, char *out, size_
             if (ok) {
                 trk_dirty_put(svc->current_tab);
                 trk_cache_invalidate(svc->current_tab);
+                cancel_auto_reminders(1, is_out ? 1 : 0);
                 char *en = json_escape(name);
                 if (is_in) {
                     snprintf(out, cap,
@@ -631,7 +644,10 @@ int tracking_do_clock(TrackingService *svc, const char *action, char *out, size_
     }
 
 finish:
-    if (code == 200 && svc->current_tab[0]) trk_cache_invalidate(svc->current_tab);
+    if (code == 200 && svc->current_tab[0]) {
+        trk_cache_invalidate(svc->current_tab);
+        cancel_auto_reminders(1, is_in ? 0 : 1);
+    }
     sheet_rows_free(&rows);
     free(name);
     return code;
@@ -728,6 +744,7 @@ int tracking_fill_day(TrackingService *svc, const char *month, int day,
         if (st >= 200 && st < 300) {
             trk_dirty_put(tab);                 /* выгрузка в Google — фоном */
             trk_cache_invalidate(tab);          /* следующий days уйдёт в БД */
+            cancel_auto_reminders(1, 1);        /* приход и уход отмечены */
             char *en = json_escape(name);
             snprintf(out, cap,
                      "{\"ok\":true,\"name\":\"%s\",\"month\":\"%s\",\"date\":\"%s\","
@@ -831,7 +848,10 @@ int tracking_fill_day(TrackingService *svc, const char *month, int day,
     code = 200;
 
 fill_finish:
-    if (code == 200) trk_cache_invalidate(tab);
+    if (code == 200) {
+        trk_cache_invalidate(tab);
+        cancel_auto_reminders(1, 1);
+    }
     sheet_rows_free(&rows);
     free(name);
     return code;

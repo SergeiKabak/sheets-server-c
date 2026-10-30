@@ -673,6 +673,26 @@ int sb_reminder_cancel_auto(long long chat_id) {
     return sb_call("DELETE", path, NULL);
 }
 
+int sb_reminder_cancel_kinds(const char *kinds) {
+    if (!sb_on || !kinds || !*kinds) return 0;
+    char path[256];
+    snprintf(path, sizeof(path), "/reminders?sent=eq.false&kind=in.(%s)", kinds);
+    return sb_call("DELETE", path, NULL);
+}
+
+int sb_reminder_purge_sent(long long before) {
+    if (!sb_on) return 0;
+    char iso[32];
+    sb_epoch_iso(before, iso, sizeof(iso));
+    char *ei = url_encode(iso);
+    if (!ei) return 0;
+    char path[256];
+    snprintf(path, sizeof(path),
+             "/reminders?sent=eq.true&remind_at=lt.%s", ei);
+    free(ei);
+    return sb_call("DELETE", path, NULL);
+}
+
 /* ---------- подписка «напоминать по графику» ---------- */
 
 int sb_sub_set(long long chat_id, int enabled, int start_lead_min,
