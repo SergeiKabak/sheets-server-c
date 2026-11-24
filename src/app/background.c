@@ -4,6 +4,7 @@
 #include "app/reminder_service.h"
 #include "app/schedule_service.h"
 #include "domain/schedule.h"
+#include "infra/clock.h"
 #include "infra/supabase.h"
 
 #include <stdio.h>
@@ -12,11 +13,11 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Листы графика читаются раз в GOOGLE_SYNC_TTL (30 минут, см. app/config.h):
- * люди правят график редко, а каждый обход — это запрос метаданных +
- * запрос на каждый лист. Между обходами живём на /tmp/months.dat и таблице
- * schedule. Проверка идёт на тике цикла (~60 с), поэтому фактический
- * интервал — «не чаще раза в 30 минут». */
+/* Листы графика читаются раз в GOOGLE_SYNC_TTL (30 минут, см. app/config.h)
+ * и только в рабочее окно GOOGLE_SYNC_HOUR_FROM..TO (07:00–21:00 локально):
+ * люди правят график редко и ночью, а каждый обход — это запрос метаданных
+ * + запрос на каждый лист. Между обходами живём на /tmp/months.dat и таблице
+ * schedule. Проверка идёт на тике цикла (~60 с). */
 /* ================================================================
  *  Этап 1 плана Supabase: строки самого сотрудника в буфер
  * ================================================================ */
@@ -57,10 +58,13 @@ void background_run(AppContext *app) {
         int c = 0;
 
         /* График из Google читаем не каждый тик, а раз в GOOGLE_SYNC_TTL
-         * (30 минут): листы правят люди, а нам важнее не жечь трафик и квоту
-         * Google (1 запрос метаданных + по одному на лист). Между чтениями
-         * живём на кэше. */
-        if (time(NULL) - last_google >= GOOGLE_SYNC_TTL) {
+         * (30 минут) и только в рабочее окно: ночью (21:00–07:00) листы
+         * никто не правит — опрос выключен, трафик и квота не тратятся.
+         * Между чтениями живём на кэше. */
+        int google_hours = clock_in_hour_window(app->tracking.tz_offset,
+                                                GOOGLE_SYNC_HOUR_FROM,
+                                                GOOGLE_SYNC_HOUR_TO);
+        if (google_hours && time(NULL) - last_google >= GOOGLE_SYNC_TTL) {
             last_google = time(NULL);
             sb_begin_cycle();   /* updated_at текущего цикла — ДО сбора строк */
 

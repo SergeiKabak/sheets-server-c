@@ -370,9 +370,13 @@ int tracking_cache_refresh(TrackingService *svc, const char *const *months, int 
 
     char out[16384];
     int ok = 0;
-    /* Фоллбэк чтения Google — не чаще одного окна GOOGLE_SYNC_TTL. */
+    /* Фоллбэк чтения Google — не чаще одного окна GOOGLE_SYNC_TTL и только
+       в рабочее время: ночью листы не читаем. */
     static time_t last_google_fallback = 0;
-    int google_allowed = (time(NULL) - last_google_fallback >= GOOGLE_SYNC_TTL);
+    int google_allowed = (time(NULL) - last_google_fallback >= GOOGLE_SYNC_TTL) &&
+                         clock_in_hour_window(svc->tz_offset,
+                                              GOOGLE_SYNC_HOUR_FROM,
+                                              GOOGLE_SYNC_HOUR_TO);
     int lim = count < TRACKING_MAX_MONTHS ? count : TRACKING_MAX_MONTHS;
     for (int i = 0; i < lim; i++) {
         if (!months[i] || !*months[i]) continue;
@@ -1310,8 +1314,12 @@ int tracking_list_months(TrackingService *svc, char ***out, int *count, int max)
 
     /* Список вкладок меняется раз в месяц, а фоновый цикл спрашивает его
        на каждом тике: отдаём /tmp/trk_tabs.txt, а к Google идём не чаще
-       TRK_TABS_TTL (30 минут). */
-    if (trk_tabs_cache_read(out, count, max) == 0) return 0;
+       TRK_TABS_TTL (30 минут) и только в рабочее окно. */
+    if (trk_tabs_cache_read(out, count, max, TRK_TABS_TTL) == 0) return 0;
+    if (!clock_in_hour_window(svc->tz_offset, GOOGLE_SYNC_HOUR_FROM,
+                              GOOGLE_SYNC_HOUR_TO) &&
+        trk_tabs_cache_read(out, count, max, -1) == 0)
+        return 0;   /* ночью Google не опрашиваем — устаревший список лучше запроса */
 
     if (!svc->sheets.sheet_id && google_sheets_ensure(&svc->sheets) != 0) return -1;
     if (!svc->sheets.sheet_id) return -1;

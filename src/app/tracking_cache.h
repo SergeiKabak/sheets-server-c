@@ -41,9 +41,10 @@ void trk_dirty_clear(const char *tab);
  * Список меняется раз в месяц, а фоновый цикл спрашивает его каждую минуту.
  * Кэш (/tmp/trk_tabs.txt) убирает из тика запрос метаданных к Google. */
 
-/* Читает свежий список. Возвращает 0 при успехе; *out — массив malloc-нутых
- * строк (освобождает вызывающий). */
-int trk_tabs_cache_read(char ***out, int *count, int max);
+/* Читает список. max_age < 0 — возраст не проверяется (устаревший список
+ * можно отдать ночью, когда Google не опрашивается). Возвращает 0 при
+ * успехе; *out — массив malloc-нутых строк (освобождает вызывающий). */
+int trk_tabs_cache_read(char ***out, int *count, int max, int max_age);
 
 /* Пишет список вкладок в кэш. */
 int trk_tabs_cache_write(char *const *tabs, int count);

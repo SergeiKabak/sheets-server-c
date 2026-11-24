@@ -19,6 +19,13 @@ extern "C" {
  * так что 30 минут — достаточная свежесть. */
 #define GOOGLE_SYNC_TTL (30 * 60)
 
+/* Рабочее окно локального времени (часы, [from, to)), когда фон ходит
+ * в Google. Ночью (21:00–07:00) листы никто не правит — опрос выключен,
+ * трафик и квота не тратятся. Пояс — тот же, что у TrackingService
+ * (tz_offset, по умолчанию UTC+3). */
+#define GOOGLE_SYNC_HOUR_FROM 7
+#define GOOGLE_SYNC_HOUR_TO   21
+
 typedef struct {
     const char *bot_token;        /* BOT_TOKEN */
     const char *spreadsheet_id;   /* SPREADSHEET_ID */

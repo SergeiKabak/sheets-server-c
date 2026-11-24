@@ -23,6 +23,13 @@ void clock_month_tab(int tz_offset, char *out, size_t cap);
 /* Текущий год по локальному времени. */
 int clock_current_year(int tz_offset);
 
+/* Текущий час (0..23) по локальному времени. */
+int clock_local_hour(int tz_offset);
+
+/* Попадает ли текущее локальное время в окно [from, to) часов.
+ * from == to — окно круглосуточное; from > to — окно через полночь. */
+int clock_in_hour_window(int tz_offset, int from, int to);
+
 /* Монотонное время в миллисекундах (для замеров длительности). */
 long clock_monotonic_ms(void);
 

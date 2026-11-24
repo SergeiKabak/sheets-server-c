@@ -30,6 +30,20 @@ int clock_current_year(int tz_offset) {
     return tm.tm_year + 1900;
 }
 
+int clock_local_hour(int tz_offset) {
+    time_t now = time(NULL) + tz_offset;
+    struct tm tm;
+    gmtime_r(&now, &tm);
+    return tm.tm_hour;
+}
+
+int clock_in_hour_window(int tz_offset, int from, int to) {
+    if (from == to) return 1;
+    int h = clock_local_hour(tz_offset);
+    if (from < to) return h >= from && h < to;
+    return h >= from || h < to;   /* окно через полночь */
+}
+
 long clock_monotonic_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

@@ -73,11 +73,11 @@ void trk_dirty_clear(const char *tab) {
 /* Одна вкладка на строку; имена — только "MM.YYYY" (проверка ниже). */
 #define TRK_TABS_FILE "/tmp/trk_tabs.txt"
 
-int trk_tabs_cache_read(char ***out, int *count, int max) {
+int trk_tabs_cache_read(char ***out, int *count, int max, int max_age) {
     if (!out || !count || max <= 0) return -1;
     *out = NULL;
     *count = 0;
-    if (file_is_fresh(TRK_TABS_FILE, TRK_TABS_TTL) != 1) return -1;
+    if (file_is_fresh(TRK_TABS_FILE, max_age) != 1) return -1;
 
     char buf[4096];
     long n = file_read_all(TRK_TABS_FILE, buf, sizeof(buf));
