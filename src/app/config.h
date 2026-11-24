@@ -12,6 +12,13 @@
 extern "C" {
 #endif
 
+/* Единый интервал обращения к Google Sheets по таймеру (секунды).
+ * Полный обход графика — это запрос метаданных плюс запрос на каждый лист,
+ * поэтому частый опрос превращается в гигабайты трафика в месяц и жжёт
+ * квоту Google. Листы правят люди, а Mini App отвечает из кэшей и БД,
+ * так что 30 минут — достаточная свежесть. */
+#define GOOGLE_SYNC_TTL (30 * 60)
+
 typedef struct {
     const char *bot_token;        /* BOT_TOKEN */
     const char *spreadsheet_id;   /* SPREADSHEET_ID */

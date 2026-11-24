@@ -46,6 +46,12 @@ int  sb_flush(const char *const *months, int nmonths, int *errors);
 /* Строка журнала sync_log (fire-and-forget): пульс и ошибки синхронизации */
 void sb_log(const char *kind, const char *month, int rows, int ok, const char *error);
 
+/* Убирает строки sync_log старше before (UTC, секунды с эпохи).
+   Журнал нужен только для диагностики свежих циклов, поэтому старые
+   записи (пульс каждые ~10 минут) копятся без пользы.
+   HTTP-код, 0 — выключено/ошибка. */
+int sb_sync_log_purge(long long before);
+
 /* Содержимое буфера по месяцу — для диагностики и тестов (JSON-массив). */
 const char *sb_pending(const char *month, int *count);
 

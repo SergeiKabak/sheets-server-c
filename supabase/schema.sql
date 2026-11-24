@@ -30,7 +30,9 @@ create table if not exists month_meta (
   updated_at   timestamptz not null default now()
 );
 
--- Журнал синхронизации: «пульс» каждые ~10 минут + ошибки
+-- Журнал синхронизации: «пульс» каждые ~10 минут + ошибки.
+-- Фоновый цикл раз в сутки удаляет строки старше недели (sb_sync_log_purge):
+-- для диагностики нужны только свежие записи, иначе таблица растёт вечно.
 create table if not exists sync_log (
   id         bigint generated always as identity primary key,
   kind       text not null default '',

@@ -4,6 +4,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -63,4 +64,62 @@ void trk_dirty_clear(const char *tab) {
     char path[64];
     snprintf(path, sizeof(path), "/tmp/gdirty_%s", tab);
     file_remove(path);
+}
+
+/* ================================================================
+ *  Список вкладок-месяцев Google (/tmp/trk_tabs.txt)
+ * ================================================================ */
+
+/* Одна вкладка на строку; имена — только "MM.YYYY" (проверка ниже). */
+#define TRK_TABS_FILE "/tmp/trk_tabs.txt"
+
+int trk_tabs_cache_read(char ***out, int *count, int max) {
+    if (!out || !count || max <= 0) return -1;
+    *out = NULL;
+    *count = 0;
+    if (file_is_fresh(TRK_TABS_FILE, TRK_TABS_TTL) != 1) return -1;
+
+    char buf[4096];
+    long n = file_read_all(TRK_TABS_FILE, buf, sizeof(buf));
+    if (n <= 0 || n >= (long)sizeof(buf)) return -1;
+
+    char **list = calloc((size_t)max, sizeof(char *));
+    if (!list) return -1;
+
+    int kept = 0;
+    char *p = buf;
+    while (p && *p && kept < max) {
+        char *nl = strchr(p, '\n');
+        if (nl) *nl = '\0';
+        if (*p && strlen(p) <= 16 && strspn(p, "0123456789.") == strlen(p)) {
+            list[kept] = strdup(p);
+            if (!list[kept]) break;
+            kept++;
+        }
+        p = nl ? nl + 1 : NULL;
+    }
+    if (kept == 0) {
+        free(list);
+        return -1;
+    }
+    *out = list;
+    *count = kept;
+    return 0;
+}
+
+int trk_tabs_cache_write(char *const *tabs, int count) {
+    if (!tabs || count <= 0) return -1;
+    char buf[4096];
+    size_t o = 0;
+    for (int i = 0; i < count; i++) {
+        if (!tabs[i] || !*tabs[i]) continue;
+        int w = snprintf(buf + o, sizeof(buf) - o, "%s\n", tabs[i]);
+        if (w < 0 || (size_t)w >= sizeof(buf) - o) return -1;
+        o += (size_t)w;
+    }
+    return o ? file_write_atomic(TRK_TABS_FILE, buf, o) : -1;
+}
+
+void trk_tabs_cache_invalidate(void) {
+    file_remove(TRK_TABS_FILE);
 }

@@ -87,7 +87,7 @@ src/
 
 ```
 Google Sheets (листы правят люди)
-   │  раз в SCHEDULE_GOOGLE_TTL = 300 с (фон)
+   │  раз в GOOGLE_SYNC_TTL = 1800 с (30 минут, фон)
    ▼
 Supabase schedule  ←  строки всех сотрудников (валидные: есть имя и смена)
 Supabase month_meta ←  ширина строки листа + счётчик «Всего смен»

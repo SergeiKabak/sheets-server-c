@@ -23,6 +23,6 @@ create table if not exists public.month_meta (
 -- Пишет только сервер (service_role обходит RLS), anon-ключ не видит ничего.
 alter table public.month_meta enable row level security;
 
--- Проверка: таблица создана и пуста (заполнится в течение 5 минут
+-- Проверка: таблица создана и пуста (заполнится в течение 30 минут
 -- после деплоя — при первом обходе листов Google).
 --   select * from public.month_meta order by month;

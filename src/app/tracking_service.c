@@ -96,6 +96,7 @@ static int load_or_create_month_sheet(TrackingService *svc, const char *tab,
     } else {
         /* листа нет — создаём и перечитываем (пустой лист) */
         if (google_sheets_create_sheet(&svc->sheets, tab) != 0) return -1;
+        trk_tabs_cache_invalidate();   /* список вкладок изменился */
         char *r2 = google_sheets_get_values(&svc->sheets, tab);
         if (r2) { sheet_rows_parse_values_json(rows, r2); free(r2); }
     }
@@ -369,6 +370,9 @@ int tracking_cache_refresh(TrackingService *svc, const char *const *months, int 
 
     char out[16384];
     int ok = 0;
+    /* Фоллбэк чтения Google — не чаще одного окна GOOGLE_SYNC_TTL. */
+    static time_t last_google_fallback = 0;
+    int google_allowed = (time(NULL) - last_google_fallback >= GOOGLE_SYNC_TTL);
     int lim = count < TRACKING_MAX_MONTHS ? count : TRACKING_MAX_MONTHS;
     for (int i = 0; i < lim; i++) {
         if (!months[i] || !*months[i]) continue;
@@ -383,12 +387,21 @@ int tracking_cache_refresh(TrackingService *svc, const char *const *months, int 
                 if (tabs[j] && strcmp(tabs[j], tab) == 0) { exists = 1; break; }
         }
         /* Кэш дней строим из БД (первоисточник): правки в дашборде
-           отражаются в Mini App в течение 60 с. Google — только фоллбэк. */
-        int code = tracking_days_from_db(svc, months[i], out, sizeof(out)) == 0
-                 ? 200
-                 : ((have_tabs && !exists)
-                        ? tracking_days_empty(svc, months[i], out, sizeof(out))
-                        : tracking_days_build(svc, months[i], out, sizeof(out)));
+           отражаются в Mini App в течение 60 с. Google — только фоллбэк,
+           и не чаще GOOGLE_SYNC_TTL: иначе при лежащей БД каждый тик
+           скачивал бы все листы учёта времени. */
+        int code;
+        if (tracking_days_from_db(svc, months[i], out, sizeof(out)) == 0) {
+            code = 200;
+        } else if (have_tabs && !exists) {
+            code = tracking_days_empty(svc, months[i], out, sizeof(out));
+        } else if (google_allowed) {
+            if (time(NULL) - last_google_fallback >= GOOGLE_SYNC_TTL)
+                last_google_fallback = time(NULL);
+            code = tracking_days_build(svc, months[i], out, sizeof(out));
+        } else {
+            code = 500;   /* ждём следующее окно; старый кэш остаётся */
+        }
         if (code != 200) continue;
         if (trk_cache_write(tab, out) == 0) ok++;
     }
@@ -1295,6 +1308,11 @@ int tracking_list_months(TrackingService *svc, char ***out, int *count, int max)
     *out = NULL;
     *count = 0;
 
+    /* Список вкладок меняется раз в месяц, а фоновый цикл спрашивает его
+       на каждом тике: отдаём /tmp/trk_tabs.txt, а к Google идём не чаще
+       TRK_TABS_TTL (30 минут). */
+    if (trk_tabs_cache_read(out, count, max) == 0) return 0;
+
     if (!svc->sheets.sheet_id && google_sheets_ensure(&svc->sheets) != 0) return -1;
     if (!svc->sheets.sheet_id) return -1;
 
@@ -1314,6 +1332,7 @@ int tracking_list_months(TrackingService *svc, char ***out, int *count, int max)
     }
     *out = list;
     *count = kept;
+    trk_tabs_cache_write(list, kept);
     return 0;
 }
 
@@ -1422,6 +1441,9 @@ void tracking_service_init(TrackingService *svc, const AppConfig *cfg) {
 
     const char *tz = getenv("TZ_OFFSET_SECONDS");
     if (tz) svc->tz_offset = atoi(tz);
+
+    /* Список вкладок мог остаться от прошлой таблицы/запуска. */
+    trk_tabs_cache_invalidate();
 
     trk_log("init: sheet=%s sa=%s rate=%.0f tz=%d",
             svc->sheets.sheet_id ? svc->sheets.sheet_id : "(null)",

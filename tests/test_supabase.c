@@ -207,6 +207,7 @@ int main(void) {
     assert(sb_reminder_cancel_kinds("") == 0);
     assert(sb_reminder_cancel_kinds("shift_missing") == 0);
     assert(sb_reminder_purge_sent(0) == 0);
+    assert(sb_sync_log_purge(0) == 0);   /* чистка журнала синхронизации */
 
     /* ---------- Диагностика: недоступная база -> ok:false, без падения ---------- */
     {
