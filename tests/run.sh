@@ -14,7 +14,7 @@ gcc -O0 -g -Isrc -Wno-unused-function -Wno-unused-parameter \
     src/app/tracking_service.c src/app/config.c \
     src/app/tracking_cache.c \
     src/infra/supabase.c src/infra/google_auth.c src/infra/google_sheets.c \
-    src/infra/file_store.c src/infra/clock.c \
+    src/infra/file_store.c src/infra/heartbeat.c src/infra/clock.c \
     src/core/json_text.c src/core/strbuf.c src/core/num.c src/core/url_codec.c \
     src/core/date_time.c src/core/shift.c \
     src/domain/timesheet.c src/domain/schedule.c src/domain/time_entry.c \

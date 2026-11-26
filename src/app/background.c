@@ -3,8 +3,10 @@
 #include "app/month_cache.h"
 #include "app/reminder_service.h"
 #include "app/schedule_service.h"
+#include "app/tracking_cache.h"
 #include "domain/schedule.h"
 #include "infra/clock.h"
+#include "infra/heartbeat.h"
 #include "infra/supabase.h"
 
 #include <stdio.h>
@@ -53,12 +55,21 @@ void background_run(AppContext *app) {
     MonthSchedule months[SCHEDULE_MAX_MONTHS];
     time_t last_google = 0;   /* когда последний раз читали листы Google */
 
+    /* Расписания «дорогих» дел. Тик остаётся раз в минуту (нужен, чтобы
+     * вовремя поймать окно Google и срок напоминания), но каждый тик больше
+     * не ходит в сеть: у каждого дела — свой интервал, см. app/background.h. */
+    time_t last_tracking = 0;             /* кэш отметок: TRK_REFRESH_TTL */
+    time_t last_plan = 0;                 /* раскладка напоминаний */
+    time_t last_menu = time(NULL);        /* кнопку меню ставит main.c при старте */
+
     for (;;) {
+        int sync_rows = -1;   /* строк буфера в текущем обходе (-1 — нет данных) */
+        int sync_errs = 0;
         memset(months, 0, sizeof(months));
         int c = 0;
 
         /* График из Google читаем не каждый тик, а раз в GOOGLE_SYNC_TTL
-         * (30 минут) и только в рабочее окно: ночью (21:00–07:00) листы
+         * (час) и только в рабочее окно: ночью (21:00–07:00) листы
          * никто не правит — опрос выключен, трафик и квота не тратятся.
          * Между чтениями живём на кэше. */
         int google_hours = clock_in_hour_window(app->tracking.tz_offset,
@@ -90,15 +101,19 @@ void background_run(AppContext *app) {
                 int errs = 0;
                 int rows = sb_flush(titles, nt, &errs);
                 fprintf(stderr, "[sync] supabase schedule: rows=%d errors=%d\n", rows, errs);
-                /* Пульс в sync_log — раз в 10 минут по часам (не по числу
-                   циклов: Google теперь читается раз в 30 минут) + любая ошибка */
-                static time_t last_pulse = 0;
-                if (errs || time(NULL) - last_pulse >= 600) {
-                    last_pulse = time(NULL);
-                    sb_log("schedule", "", rows, errs == 0,
-                           errs ? "HTTP error при синхронизации графика" : "");
-                }
+                sync_rows = rows;
+                sync_errs = errs;
+                /* В sync_log пишем ТОЛЬКО ошибки: успешный обход виден по
+                   метке /tmp/last_cycle (её показывает /diag/supabase), а
+                   строка в БД на каждый обход — это запрос в сеть ради
+                   одного числа (см. docs/OPTIMIZE_BANDWIDTH.md). */
+                if (errs)
+                    sb_log("schedule", "", rows, 0,
+                           "HTTP error при синхронизации графика");
             }
+
+            /* Пульс «фон жив»: локальный файл, без сети и без БД. */
+            heartbeat_write((long long)time(NULL), sync_rows, sync_errs);
         } else {
             c = month_cache_load(months, SCHEDULE_MAX_MONTHS);
         }
@@ -112,8 +127,11 @@ void background_run(AppContext *app) {
         }
 
         /* Тот же цикл обновляет и кэш отметок Time tracking, чтобы Mini App
-           не ждал Google при переключении месяца. */
-        if (c > 0) {
+           не ждал БД/Google при открытии месяца. Обновление — раз в
+           TRK_REFRESH_TTL, а не на каждом тике: отметки месяца в БД меняются
+           только при записи, и такая запись сама инвалидирует кэш. */
+        if (c > 0 && time(NULL) - last_tracking >= TRK_REFRESH_TTL) {
+            last_tracking = time(NULL);
             const char *labels[SCHEDULE_MAX_MONTHS];
             int lc = 0;
             for (int i = 0; i < c && i < SCHEDULE_MAX_MONTHS; i++)
@@ -151,18 +169,23 @@ void background_run(AppContext *app) {
                    больше не нужны — иначе таблица растёт без предела. */
                 sb_reminder_purge_sent(time(NULL) - 3 * 86400);
 
-                /* sync_log: «пульс» пишется каждые ~10 минут, поэтому
-                   строки старше недели не нужны (диагностика смотрит
-                   только последние записи). Чистим раз в сутки. */
+                /* sync_log: теперь только ошибки, но они могут копиться
+                   месяцами — строки старше недели удаляем раз в сутки. */
                 sb_sync_log_purge(time(NULL) - 7 * 86400);
             }
         }
 
         /* Напоминания по графику: раскладываем сегодняшние (начало/конец
-           смены) для подписанных чатов, пока кэш месяцев ещё в памяти. */
-        if (c > 0) {
+           смены) для подписанных чатов, пока кэш месяцев ещё в памяти.
+           Раз в REMINDER_PLAN_TTL: слоты строятся на весь день вперёд, а не
+           только на ближайшую минуту, поэтому пропусков нет. */
+        if (c > 0 && time(NULL) - last_plan >= REMINDER_PLAN_TTL) {
+            last_plan = time(NULL);
             int mat = reminders_materialize(&app->cfg, &app->tracking, months, c);
-            if (mat > 0) fprintf(stderr, "[remind] planned: %d\n", mat);
+            if (mat > 0) {
+                fprintf(stderr, "[remind] planned: %d\n", mat);
+                reminders_wake();   /* есть новое — не ждём паузы отправки */
+            }
         }
 
         month_schedules_free(months, c);
@@ -171,9 +194,13 @@ void background_run(AppContext *app) {
         int reminded = reminders_flush(&app->cfg, &app->tracking);
         if (reminded > 0) fprintf(stderr, "[remind] sent: %d\n", reminded);
 
-        /* Кнопка меню чата (доступ к графику-таблице) ставится периодически:
-           если при старте запрос не прошёл, доступ к таблице восстановится. */
-        bot_set_menu_button(&app->bot);
+        /* Кнопка меню чата (доступ к графику-таблице) ставится раз в сутки:
+           если запрос не прошёл, доступ к таблице восстановится следующим
+           разом. Каждый тик здесь был лишним POST в Telegram. */
+        if (time(NULL) - last_menu >= MENU_BUTTON_TTL) {
+            last_menu = time(NULL);
+            bot_set_menu_button(&app->bot);
+        }
         sleep(CACHE_TTL);
     }
 }

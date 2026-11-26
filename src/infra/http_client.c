@@ -5,6 +5,63 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+/* ================================================================
+ *  Один CURL-хендл на процесс: соединения переиспользуются
+ * ================================================================
+ *
+ * Раньше каждый запрос делал curl_easy_init() + curl_easy_cleanup(), то есть
+ * новое TCP-соединение и новое TLS-рукопожатие на каждый вызов. Рукопожатие —
+ * это несколько килобайт в обе стороны, и на сотнях мелких запросов в сутки
+ * (напоминания, отметки, буфер графика) именно оно, а не полезные данные,
+ * составляло основную часть исходящего трафика Render.
+ *
+ * Теперь хендл живёт всё время работы процесса: curl_easy_reset() сбрасывает
+ * опции, но СОХРАНЯЕТ живые соединения, DNS-кэш и TLS-сессии — тот же сокет
+ * переиспользуется следующим запросом к тому же хосту (keep-alive).
+ *
+ * Fork: сервер обрабатывает webhook в детях (server/http_server.c), поэтому
+ * ребёнок наследует копию хендла с чужими сокетами. Копию надо выбросить —
+ * иначе два процесса будут читать один и тот же сокет. Проверки pid для
+ * этого достаточно, но выбрасывать надо БЕЗ curl_easy_cleanup (см. ниже).
+ */
+static CURL *g_curl;
+static pid_t g_curl_pid;
+
+static CURL *curl_acquire(void) {
+    pid_t me = getpid();
+    if (g_curl && g_curl_pid != me) {   /* мы в форкнутом ребёнке */
+        /* ВАЖНО: не curl_easy_cleanup()! На закрытии HTTP/2-сессии libcurl
+           посылает GOAWAY в тот же сокет, который держит родитель, и ломает
+           его соединение (следующий запрос падает с
+           «Error in the HTTP2 framing layer»). Просто забываем унаследованный
+           хендл: ребёнок живёт недолго, память и fd освободит ОС при выходе,
+           а сокет родителя не трогается. */
+        g_curl = NULL;
+    }
+    if (!g_curl) {
+        g_curl = curl_easy_init();
+        if (!g_curl) return NULL;
+        g_curl_pid = me;
+    } else {
+        curl_easy_reset(g_curl);        /* живые соединения при этом остаются */
+    }
+
+    /* Общие для всех запросов опции. */
+    curl_easy_setopt(g_curl, CURLOPT_TIMEOUT, 25L);
+    curl_easy_setopt(g_curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(g_curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(g_curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    /* Сжатие ответов (gzip/br/deflate): JSON от Supabase и Google в разы
+       меньше на проводе — сервер сам решает, чем сжимать. */
+    curl_easy_setopt(g_curl, CURLOPT_ACCEPT_ENCODING, "");
+    /* Держим простаивающее соединение живым на стороне клиента. */
+    curl_easy_setopt(g_curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(g_curl, CURLOPT_TCP_KEEPIDLE, 60L);
+    curl_easy_setopt(g_curl, CURLOPT_TCP_KEEPINTVL, 30L);
+    return g_curl;
+}
 
 /* ---------- коллбэк записи тела ответа ---------- */
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
@@ -37,25 +94,21 @@ static void set_http_code(long http_code, int *status) {
 /* ---------- GET запрос ---------- */
 char *http_get(const char *url, int *status) {
     if (status) *status = 0;
-    CURL *curl = curl_easy_init();
+    CURL *curl = curl_acquire();
     if (!curl) return NULL;
 
     char *buf = malloc(1);
-    if (!buf) { curl_easy_cleanup(curl); return NULL; }
+    if (!buf) return NULL;
     buf[0] = '\0';
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 25L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
 
     CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_cleanup(curl);
 
     if (rc != CURLE_OK) {
         free(buf);
@@ -67,20 +120,16 @@ char *http_get(const char *url, int *status) {
 
 /* ---------- POST с application/x-www-form-urlencoded ---------- */
 int http_post_form(const char *url, const char *post_fields) {
-    CURL *curl = curl_easy_init();
+    CURL *curl = curl_acquire();
     if (!curl) return 0;
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_fields);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 25L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
 
     CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_cleanup(curl);
 
     set_http_code(http_code, NULL);
     return (rc == CURLE_OK) ? (int)http_code : 0;
@@ -88,7 +137,7 @@ int http_post_form(const char *url, const char *post_fields) {
 
 /* ---------- POST с application/json ---------- */
 int http_post_json(const char *url, const char *json) {
-    CURL *curl = curl_easy_init();
+    CURL *curl = curl_acquire();
     if (!curl) return 0;
 
     struct curl_slist *headers = NULL;
@@ -97,16 +146,12 @@ int http_post_json(const char *url, const char *json) {
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 25L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
 
     CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
 
     set_http_code(http_code, NULL);
     return (rc == CURLE_OK) ? (int)http_code : 0;
@@ -117,7 +162,7 @@ int http_request(const char *method, const char *url,
                  const char *content_type, const char *body,
                  const char *bearer, int *status) {
     if (status) *status = 0;
-    CURL *curl = curl_easy_init();
+    CURL *curl = curl_acquire();
     if (!curl) return 0;
 
     struct curl_slist *headers = NULL;
@@ -136,16 +181,12 @@ int http_request(const char *method, const char *url,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
     if (body) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 25L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
 
     CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
 
     set_http_code(http_code, status);
     return (rc == CURLE_OK) ? (int)http_code : 0;
@@ -177,7 +218,7 @@ char *http_request_h(const char *method, const char *url,
                      char *hdr_out, size_t hdr_cap) {
     if (status) *status = 0;
     if (hdr_out && hdr_cap) hdr_out[0] = '\0';
-    CURL *curl = curl_easy_init();
+    CURL *curl = curl_acquire();
     if (!curl) return NULL;
 
     struct curl_slist *headers = NULL;
@@ -194,9 +235,6 @@ char *http_request_h(const char *method, const char *url,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
     if (body) curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 25L);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
 
     struct hd_store store = { hdr_out, hdr_cap };
     if (hdr_out && hdr_cap) {
@@ -207,7 +245,7 @@ char *http_request_h(const char *method, const char *url,
     }
 
     char *buf = malloc(1);
-    if (!buf) { curl_slist_free_all(headers); curl_easy_cleanup(curl); return NULL; }
+    if (!buf) { curl_slist_free_all(headers); return NULL; }
     buf[0] = '\0';
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
@@ -216,7 +254,6 @@ char *http_request_h(const char *method, const char *url,
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
 
     if (rc != CURLE_OK) {
         free(buf);

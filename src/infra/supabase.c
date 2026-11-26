@@ -1,6 +1,6 @@
 /* infra/supabase.c — транспорт и буфер строк для Supabase (PostgREST).
  *
- * Цикл (раз в 60 с, из app/background):
+ * Цикл (обход Google — раз в GOOGLE_SYNC_TTL, из app/background):
  *   1. sb_begin_cycle()           — фиксируем updated_at цикла
  *   2. sb_row(...) во время обхода листов Google
  *   3. sb_flush(months, n, &err):
@@ -8,7 +8,13 @@
  *        DELETE /rest/v1/schedule?month=eq.X&updated_at=lt.<cutoff>
  *               — уборка строк, которых больше нет в Google
  *        DELETE /rest/v1/schedule?month=eq.X   — месяцы, пропавшие из Google
- *   4. sb_log(...)                — журнал sync_log (пульс каждые 10 циклов)
+ *   4. sb_log(...)                — журнал sync_log: ТОЛЬКО ошибки HTTP
+ *                                   (успешные обходы — метка /tmp/last_cycle)
+ *
+ * Upsert и уборка идут только для месяцев, которые РЕАЛЬНО изменились
+ * (отпечаток набора строк в /tmp/sb_month_hashes), и раз в сутки — полная
+ * перевыгрузка. Иначе каждый обход Google отправлял бы в БД ~160 КБ на
+ * каждый месяц одних и тех же строк (см. «Этап 5.3» в docs/SUPABASE_PLAN.md).
  *
  * Дубликаты PK внутри одного батча отсекаются: PostgREST отдаёт ошибку
  * «ON CONFLICT DO UPDATE cannot affect row a second time».
@@ -20,6 +26,8 @@
 #include "core/num.h"
 #include "core/strbuf.h"
 #include "core/url_codec.h"
+#include "infra/file_store.h"
+#include "infra/heartbeat.h"
 #include "infra/http_client.h"
 
 #include <ctype.h>
@@ -215,17 +223,172 @@ static int sb_call(const char *method, const char *path, const char *body) {
     return sb_call_pref(method, path, body, NULL);
 }
 
+/* ---------------- отпечатки месяцев ----------------
+ *
+ * Каждый обход листов Google заново собирает весь месяц: это ~160 КБ JSON
+ * на месяц, и раньше они улетали в Supabase на каждом цикле — то есть
+ * сотни мегабайт в месяц ради того, чтобы перезаписать те же строки.
+ * График правят люди, а не таймер, поэтому сравниваем набор строк месяца
+ * (PK: день|сотрудник|смена|кабинет — без updated_at, он меняется всегда)
+ * с отпечатком прошлой успешной выгрузки и грузим только изменившиеся.
+ *
+ * Раз в сутки (SB_FULL_FLUSH_TTL) отпечатки игнорируются: если строки
+ * удалили руками в дашборде, они восстановятся. */
+#define SB_HASH_FILE      "/tmp/sb_month_hashes"
+#define SB_FULL_FLUSH_AT  "/tmp/sb_full_flush_at"
+#define SB_FULL_FLUSH_TTL (24 * 3600)
+#define SB_MONTHS_MAX     64
+
+typedef struct {
+    char month[64];
+    unsigned long long hash;
+} SbStamp;
+
+static unsigned long long sb_fnv1a(unsigned long long h, const char *s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        h ^= (unsigned char)s[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/* Отпечаток набора строк месяца: все PK в том же порядке, что и строки. */
+static unsigned long long sb_bucket_hash(const SBucket *b) {
+    unsigned long long h = 14695981039346656037ULL;
+    for (int i = 0; i < b->nkeys; i++)
+        h = sb_fnv1a(h, b->keys[i], strlen(b->keys[i]) + 1);
+    return h;
+}
+
+static int sb_stamps_read(SbStamp *out, int max) {
+    char buf[8192];
+    long n = file_read_all(SB_HASH_FILE, buf, sizeof(buf));
+    if (n <= 0) return 0;
+    int count = 0;
+    char *p = buf;
+    while (p && *p && count < max) {
+        char *nl = strchr(p, '\n');
+        if (nl) *nl = '\0';
+        char month[64] = "";
+        unsigned long long h = 0;
+        /* Формат строки: "<hash> <месяц>" — название месяца содержит пробел
+           («Сентябрь 2026»), поэтому хеш идёт первым. */
+        if (sscanf(p, "%llu %63[^\n]", &h, month) == 2) {
+            snprintf(out[count].month, sizeof(out[count].month), "%s", month);
+            out[count].hash = h;
+            count++;
+        }
+        p = nl ? nl + 1 : NULL;
+    }
+    return count;
+}
+
+static void sb_stamps_write(const SbStamp *st, int count) {
+    char buf[8192];
+    size_t o = 0;
+    for (int i = 0; i < count; i++) {
+        int w = snprintf(buf + o, sizeof(buf) - o, "%llu %s\n", st[i].hash, st[i].month);
+        if (w < 0 || (size_t)w >= sizeof(buf) - o) break;
+        o += (size_t)w;
+    }
+    if (o) file_write_atomic(SB_HASH_FILE, buf, o);
+}
+
+/* 1 — пора грузить всё заново (сутки прошли или отметки нет). */
+static int sb_full_flush_due(void) {
+    return file_is_fresh(SB_FULL_FLUSH_AT, SB_FULL_FLUSH_TTL) != 1;
+}
+
+static void sb_full_flush_mark(void) {
+    char ts[32];
+    int n = snprintf(ts, sizeof(ts), "%lld\n", (long long)time(NULL));
+    file_write_atomic(SB_FULL_FLUSH_AT, ts, (size_t)n);
+}
+
 /* ---------------- flush ---------------- */
+
+/* Точный счётчик строк PostgREST (реализация ниже, в разделе диагностики). */
+static int sb_count(const char *path, long *total);
+
+/* Холодный старт (после рестарта контейнера /tmp пуст, отпечатков нет):
+ * полная перевыгрузка месяца — это ~160 КБ тела. Спрашиваем у БД только
+ * количество строк месяца (GET limit=0 + Prefer: count=exact, ответ без
+ * тела, ~300 байт заголовков) и, если оно совпадает с локальным, считаем
+ * месяц уже синхронным — грузить нечего. */
+static int sb_month_count_matches(const char *month, int rows) {
+    char *em = url_encode(month);
+    if (!em) return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "/schedule?month=eq.%s&select=month&limit=0", em);
+    free(em);
+    long total = -1;
+    int st = sb_count(path, &total);
+    return (st >= 200 && st < 300 && total == (long)rows) ? 1 : 0;
+}
 
 int sb_flush(const char *const *months, int nmonths, int *errors) {
     if (errors) *errors = 0;
     if (!sb_on) return 0;
     int total = 0, errs = 0;
 
-    /* 1) upsert накопленных строк */
+    SbStamp stamps[SB_MONTHS_MAX];
+    int nst = sb_stamps_read(stamps, SB_MONTHS_MAX);
+    int force = sb_full_flush_due();
+
+    /* Холодный старт: отпечатков нет вообще и суточная отметка тоже пропала.
+     * Прежде чем грузить всё заново, сверяем количество строк в БД. */
+    if (nst == 0 && force) {
+        int in_sync = 1;
+        for (int i = 0; i < sb_nb && in_sync; i++)
+            if (sb_buckets[i].count > 0)
+                in_sync = sb_month_count_matches(sb_buckets[i].month,
+                                                 sb_buckets[i].count);
+        if (in_sync && sb_nb > 0) {
+            for (int i = 0; i < sb_nb && nst < SB_MONTHS_MAX; i++) {
+                if (sb_buckets[i].count <= 0) continue;
+                snprintf(stamps[nst].month, sizeof(stamps[nst].month), "%s",
+                         sb_buckets[i].month);
+                stamps[nst].hash = sb_bucket_hash(&sb_buckets[i]);
+                nst++;
+            }
+            sb_stamps_write(stamps, nst);
+            sb_full_flush_mark();
+            force = 0;
+            fprintf(stderr, "[supabase] холодный старт: БД уже совпадает, "
+                            "перевыгрузка не нужна\n");
+        }
+    }
+
+    if (force) fprintf(stderr, "[supabase] полная выгрузка (раз в сутки)\n");
+
+    /* Месяцы, которые в этом цикле реально ушли в БД. Для остальных нельзя
+     * делать уборку по updated_at: их строки не обновлялись, и DELETE снёс бы
+     * живые данные. */
+    char flushed[SB_MAX_BUCKETS][64];
+    int nflushed = 0;
+
+    /* 1) upsert накопленных строк (только изменившиеся месяцы) */
     for (int i = 0; i < sb_nb; i++) {
         SBucket *b = &sb_buckets[i];
         if (b->count <= 0) continue;
+
+        unsigned long long h = sb_bucket_hash(b);
+        int same = 0;
+        if (!force) {
+            for (int k = 0; k < nst; k++)
+                if (!strcmp(stamps[k].month, b->month) && stamps[k].hash == h) {
+                    same = 1;
+                    break;
+                }
+        }
+        if (same) {
+            total += b->count;
+            fprintf(stderr, "[supabase] %s: без изменений, upsert пропущен\n", b->month);
+            b->len = 0;
+            b->count = 0;
+            b->nkeys = 0;
+            continue;
+        }
 
         char *body = malloc(b->len + 3);
         if (!body) { errs++; continue; }
@@ -242,17 +405,37 @@ int sb_flush(const char *const *months, int nmonths, int *errors) {
                     b->month, b->count, st);
         } else {
             total += b->count;
+            if (nflushed < SB_MAX_BUCKETS)
+                snprintf(flushed[nflushed++], sizeof(flushed[0]), "%s", b->month);
+            /* запоминаем отпечаток только после успешной записи */
+            int found = 0;
+            for (int k = 0; k < nst; k++)
+                if (!strcmp(stamps[k].month, b->month)) {
+                    stamps[k].hash = h;
+                    found = 1;
+                    break;
+                }
+            if (!found && nst < SB_MONTHS_MAX) {
+                snprintf(stamps[nst].month, sizeof(stamps[nst].month), "%s", b->month);
+                stamps[nst].hash = h;
+                nst++;
+            }
         }
         b->len = 0;
         b->count = 0;
         b->nkeys = 0;
     }
+    sb_stamps_write(stamps, nst);
 
     /* 2) уборка устаревших строк (строки с прошлых циклов) и
           полная очистка месяцев, которых больше нет в Google */
     if (sb_cutoff[0]) {
         for (int i = 0; i < nmonths; i++) {
             if (!months || !months[i] || !months[i][0]) continue;
+            int was = 0;
+            for (int k = 0; k < nflushed; k++)
+                if (!strcmp(flushed[k], months[i])) { was = 1; break; }
+            if (!was) continue;   /* месяц не менялся — его строки не устарели */
             char *em = url_encode(months[i]);
             char *ec = url_encode(sb_cutoff);
             if (em && ec) {
@@ -298,6 +481,7 @@ int sb_flush(const char *const *months, int nmonths, int *errors) {
     }
 
     if (errors) *errors = errs;
+    if (force && errs == 0) sb_full_flush_mark();
     return total;
 }
 
@@ -1090,52 +1274,37 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
     sbuf_append(&te_months, "]");
     char *te_months_buf = sbuf_take(&te_months);
 
-    /* журнал: последняя запись + последний restore + возраст пульса */
+    /* Журнал: «жив ли фон» — из локальной метки /tmp/last_cycle (пульс в БД
+       больше не пишется), а из sync_log берём только ошибки — их немного и
+       они полезны как история (логи Render ротируются). */
     StrBuf log_js;
     sbuf_init(&log_js);
-    int log_ok = 0;
     {
+        Heartbeat hb;
+        sbuf_append(&log_js, "\"last_cycle\":");
+        if (heartbeat_read(&hb) == 0) {
+            long age = (long)(time(NULL) - (time_t)hb.at);
+            if (age < 0) age = 0;
+            sbuf_appendf(&log_js,
+                         "{\"age_sec\":%ld,\"rows\":%d,\"errs\":%d}",
+                         age, hb.rows, hb.errs);
+        } else {
+            sbuf_append(&log_js, "{\"unavailable\":true}");
+        }
+
+        sbuf_append(&log_js, ",\"errors\":[");
         int st = 0;
-        char *body = sb_get("/sync_log?select=kind,row_count,ok,error,at"
-                            "&order=at.desc&limit=10", &st);
+        char *body = sb_get("/sync_log?select=kind,row_count,error,at"
+                            "&ok=eq.false&order=at.desc&limit=5", &st);
+        int nerr = 0;
         if (body && st >= 200 && st < 300) {
             cJSON *arr = cJSON_Parse(body);
             if (arr && cJSON_IsArray(arr)) {
                 time_t now = time(NULL);
-                cJSON *first = cJSON_GetArrayItem(arr, 0);
-                if (first) {
-                    cJSON *kind = cJSON_GetObjectItemCaseSensitive(first, "kind");
-                    cJSON *rc   = cJSON_GetObjectItemCaseSensitive(first, "row_count");
-                    cJSON *ok   = cJSON_GetObjectItemCaseSensitive(first, "ok");
-                    cJSON *at   = cJSON_GetObjectItemCaseSensitive(first, "at");
-                    cJSON *errf = cJSON_GetObjectItemCaseSensitive(first, "error");
-                    long age = 0;
-                    if (cJSON_IsString(at) && at->valuestring) {
-                        time_t t = sb_parse_iso(at->valuestring);
-                        if (t > 0) age = (long)(now - t);
-                    }
-                    sbuf_append(&log_js, "\"last\":{\"kind\":");
-                    sbuf_append_json_string(&log_js,
-                        (cJSON_IsString(kind) && kind->valuestring) ? kind->valuestring : "");
-                    sbuf_appendf(&log_js, ",\"rows\":%d,\"ok\":%s,\"error\":",
-                               cJSON_IsNumber(rc) ? rc->valueint : 0,
-                               cJSON_IsTrue(ok) ? "true" : "false");
-                    sbuf_append_json_string(&log_js,
-                        (cJSON_IsString(errf) && errf->valuestring) ? errf->valuestring : "");
-                    sbuf_append(&log_js, ",\"at\":");
-                    sbuf_append_json_string(&log_js,
-                        (cJSON_IsString(at) && at->valuestring) ? at->valuestring : "");
-                    sbuf_appendf(&log_js, ",\"age_sec\":%ld}", age);
-                }
-                sbuf_append(&log_js, ",\"last_restore\":");
-                int found_restore = 0;
-                for (int i = 0; i < cJSON_GetArraySize(arr); i++) {
-                    cJSON *it = cJSON_GetArrayItem(arr, i);
+                cJSON *it = NULL;
+                cJSON_ArrayForEach(it, arr) {
                     cJSON *kind = cJSON_GetObjectItemCaseSensitive(it, "kind");
-                    if (!cJSON_IsString(kind) || !kind->valuestring ||
-                        strcmp(kind->valuestring, "time_restore") != 0) continue;
                     cJSON *rc   = cJSON_GetObjectItemCaseSensitive(it, "row_count");
-                    cJSON *ok   = cJSON_GetObjectItemCaseSensitive(it, "ok");
                     cJSON *at   = cJSON_GetObjectItemCaseSensitive(it, "at");
                     cJSON *errf = cJSON_GetObjectItemCaseSensitive(it, "error");
                     long age = 0;
@@ -1143,31 +1312,22 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
                         time_t t = sb_parse_iso(at->valuestring);
                         if (t > 0) age = (long)(now - t);
                     }
-                    sbuf_appendf(&log_js, "{\"rows\":%d,\"ok\":%s,\"error\":",
-                              cJSON_IsNumber(rc) ? rc->valueint : 0,
-                              cJSON_IsTrue(ok) ? "true" : "false");
+                    if (nerr) sbuf_append(&log_js, ",");
+                    sbuf_append(&log_js, "{\"kind\":");
+                    sbuf_append_json_string(&log_js,
+                        (cJSON_IsString(kind) && kind->valuestring) ? kind->valuestring : "");
+                    sbuf_appendf(&log_js, ",\"rows\":%d,\"error\":",
+                                 cJSON_IsNumber(rc) ? rc->valueint : 0);
                     sbuf_append_json_string(&log_js,
                         (cJSON_IsString(errf) && errf->valuestring) ? errf->valuestring : "");
-                    sbuf_append(&log_js, ",\"at\":");
-                    sbuf_append_json_string(&log_js,
-                        (cJSON_IsString(at) && at->valuestring) ? at->valuestring : "");
                     sbuf_appendf(&log_js, ",\"age_sec\":%ld}", age);
-                    found_restore = 1;
-                    break;
+                    nerr++;
                 }
-                if (!found_restore) sbuf_append(&log_js, "null");
-                log_ok = 1;
             }
             cJSON_Delete(arr);
-        } else {
-            errs++;
         }
         free(body);
-    }
-    if (!log_ok) {
-        sbuf_free(&log_js);
-        sbuf_init(&log_js);
-        sbuf_append(&log_js, "\"unavailable\":true");
+        sbuf_append(&log_js, "]");
     }
     char *log_buf = sbuf_take(&log_js);
 
@@ -1193,14 +1353,14 @@ int sb_diag(const char *const *months, int nmonths, char *out, size_t cap) {
         "{\"ok\":%s,\"at\":\"%s\",\"errors\":%d,"
         "\"schedule\":{\"total\":%ld,\"valid\":%ld,"
         "\"empty_shift\":%ld,\"empty_employee\":%ld},"
-        "\"months\":[%s],"
-        "\"time_entries\":{\"total\":%ld,\"months\":[%s]},"
+        "\"months\":%s,"
+        "\"time_entries\":{\"total\":%ld,\"months\":%s},"
         "\"sync_log\":{%s},"
         "%s}",
         (total >= 0) ? "true" : "false", now, errs,
         total, valid, empty_sh, empty_em,
-        months_buf ? months_buf : "",
-        te_total, te_months_buf ? te_months_buf : "",
+        months_buf ? months_buf : "[]",
+        te_total, te_months_buf ? te_months_buf : "[]",
         log_buf ? log_buf : "",
         mm_buf ? mm_buf : "\"month_meta\":{\"total\":0,\"months\":[]}");
     free(months_buf);

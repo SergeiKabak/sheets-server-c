@@ -42,12 +42,13 @@ int main(void) {
         return 1;
     }
 
-    /* Устанавливаем кнопку меню чата, которая открывает Mini App одним кликом */
+    /* Устанавливаем кнопку меню чата, которая открывает Mini App одним кликом.
+       Дальше её страхует фоновый цикл — раз в сутки (MENU_BUTTON_TTL),
+       а не каждый тик: setChatMenuButton — это POST в Telegram. */
     bot_set_menu_button(&app.bot);
 
     /* ВАЖНО: НЕ игнорируем SIGCHLD — на Linux это ломает waitpid() внутри
-       pclose() для popen/curl: pclose вернёт -1, и все fetch_url будут
-       ошибочно считаться проваленными. Детей рейпим в accept-цикле. */
+       accept-цикла: обработчики соединений не рейпятся и копятся зомби. */
 
     pid_t upd = fork();
     if (upd == 0) { background_run(&app); _exit(0); }

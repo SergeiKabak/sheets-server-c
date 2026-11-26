@@ -29,7 +29,12 @@ typedef enum {
     CURLOPT_TIMEOUT = 13,           /* LONG + 13 */
     CURLOPT_FOLLOWLOCATION = 52,    /* LONG + 52 */
     CURLOPT_HTTPGET = 80,           /* LONG + 80 */
-    CURLOPT_POST = 47               /* LONG + 47 */
+    CURLOPT_POST = 47,              /* LONG + 47 */
+    CURLOPT_CONNECTTIMEOUT = 78,    /* LONG + 78 */
+    CURLOPT_ACCEPT_ENCODING = 10102,/* OBJECTPOINT + 102 (gzip/br/deflate) */
+    CURLOPT_TCP_KEEPALIVE = 213,    /* LONG + 213 */
+    CURLOPT_TCP_KEEPIDLE = 214,     /* LONG + 214 */
+    CURLOPT_TCP_KEEPINTVL = 215     /* LONG + 215 */
 } CURLoption;
 
 typedef enum {
@@ -45,6 +50,7 @@ extern CURL *curl_easy_init(void);
 extern CURLcode curl_easy_setopt(CURL *curl, CURLoption option, ...);
 extern CURLcode curl_easy_perform(CURL *curl);
 extern void curl_easy_cleanup(CURL *curl);
+extern void curl_easy_reset(CURL *curl);
 extern const char *curl_easy_strerror(CURLcode code);
 extern long curl_easy_getinfo(CURL *curl, CURLINFO info, ...);
 extern struct curl_slist *curl_slist_append(struct curl_slist *, const char *);

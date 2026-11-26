@@ -30,7 +30,8 @@ create table if not exists month_meta (
   updated_at   timestamptz not null default now()
 );
 
--- Журнал синхронизации: «пульс» каждые ~10 минут + ошибки.
+-- Журнал синхронизации: пишутся ТОЛЬКО ошибки HTTP при обходе Google
+-- (успешные обходы видны по метке /tmp/last_cycle, её отдаёт /diag/supabase).
 -- Фоновый цикл раз в сутки удаляет строки старше недели (sb_sync_log_purge):
 -- для диагностики нужны только свежие записи, иначе таблица растёт вечно.
 create table if not exists sync_log (

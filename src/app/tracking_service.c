@@ -1314,7 +1314,7 @@ int tracking_list_months(TrackingService *svc, char ***out, int *count, int max)
 
     /* Список вкладок меняется раз в месяц, а фоновый цикл спрашивает его
        на каждом тике: отдаём /tmp/trk_tabs.txt, а к Google идём не чаще
-       TRK_TABS_TTL (30 минут) и только в рабочее окно. */
+       TRK_TABS_TTL (час) и только в рабочее окно. */
     if (trk_tabs_cache_read(out, count, max, TRK_TABS_TTL) == 0) return 0;
     if (!clock_in_hour_window(svc->tz_offset, GOOGLE_SYNC_HOUR_FROM,
                               GOOGLE_SYNC_HOUR_TO) &&

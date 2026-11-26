@@ -81,13 +81,14 @@ src/
 | `web/api_tracking` | `/api/tracking/*`, `/diag/tracking*` |
 | `web/diag` | `/diag`, `/diag/cabinet`, `/diag/supabase` |
 | `server/http_server` | сокет, приём запроса, fork на соединение |
+| `server/http_request` | разбор запроса: таймауты сокета (10 с), Content-Length, тело |
 | `server/router` | таблица маршрутов |
 
 ## Поток графика смен
 
 ```
 Google Sheets (листы правят люди)
-   │  раз в GOOGLE_SYNC_TTL = 1800 с (30 минут),
+   │  раз в GOOGLE_SYNC_TTL = 3600 с (час),
    │  только в рабочее окно 07:00–21:00 (локально); ночью опрос выключен
    ▼
 Supabase schedule  ←  строки всех сотрудников (валидные: есть имя и смена)

@@ -11,6 +11,19 @@
 
 #define REMINDER_BATCH 20   /* сколько напоминаний разбираем за один тик */
 
+/* Пауза после пустого опроса БД (секунды). Опрос «есть ли созревшие» — это
+ * запрос в Supabase каждую минуту, то есть ~1400 запросов в сутки (а с
+ * каждым новым TCP+TLS — ещё и десятки мегабайт трафика) ради ответа
+ * «ничего нет» большую часть дня. После пустого ответа ждём 5 минут;
+ * если materialize только что добавил напоминания, reminders_wake()
+ * снимает паузу, и они уходят без задержки. */
+#define REMINDER_EMPTY_BACKOFF 300
+
+/* Когда следующему разу спрашивать БД (0 — можно сразу). */
+static time_t flush_next_check = 0;
+
+void reminders_wake(void) { flush_next_check = 0; }
+
 static int clamp_minutes(int v, int max) {
     if (v < 0) return 0;
     if (v > max) return max;
@@ -178,8 +191,17 @@ int reminders_materialize(const AppConfig *cfg, const TrackingService *svc,
 int reminders_flush(const AppConfig *cfg, const TrackingService *svc) {
     if (!cfg || !cfg->bot_token || !*cfg->bot_token || !sb_enabled()) return 0;
 
+    time_t now = time(NULL);
+    if (now < flush_next_check) return 0;
+
     SbReminder list[REMINDER_BATCH];
-    int n = sb_reminder_due((long long)time(NULL), list, REMINDER_BATCH);
+    int n = sb_reminder_due((long long)now, list, REMINDER_BATCH);
+    if (n <= 0) {
+        flush_next_check = now + REMINDER_EMPTY_BACKOFF;
+        return 0;
+    }
+    flush_next_check = 0;   /* что-то созрело — следующий тик опять опросим */
+
     int sent = 0;
 
     for (int i = 0; i < n; i++) {

@@ -39,11 +39,19 @@ void sb_row(const char *month, int day, const char *employee,
 
 /* Отправка накопленного (upsert) + удаление устаревших строк по месяцам
    из [months..months+nmonths) + очистка месяцев, пропавших из Google.
-   Возвращает число отправленных строк; *errors (не NULL) — кол-во
+   Отправляются и убираются ТОЛЬКО изменившиеся месяцы (отпечаток набора
+   строк в /tmp/sb_month_hashes); раз в сутки — полная перевыгрузка,
+   на холодном старте — сверка количества строк с БД. Подробности и замеры:
+   docs/OPTIMIZE_BANDWIDTH.md.
+   Возвращает число строк в буфере; *errors (не NULL) — кол-во
    неудачных HTTP-вызовов. */
 int  sb_flush(const char *const *months, int nmonths, int *errors);
 
-/* Строка журнала sync_log (fire-and-forget): пульс и ошибки синхронизации */
+/* Строка журнала sync_log (fire-and-forget): ошибка синхронизации.
+   Вызывается только при сбоях — успешный обход виден по метке
+   /tmp/last_cycle (infra/heartbeat.h). Читает журнал только /diag/supabase;
+   ни бот, ни Mini App его не смотрят. Строки старше недели чистит
+   sb_sync_log_purge. */
 void sb_log(const char *kind, const char *month, int rows, int ok, const char *error);
 
 /* Убирает строки sync_log старше before (UTC, секунды с эпохи).
@@ -187,7 +195,8 @@ int sb_month_meta_list(SbMonthMeta *out, int max);
 
 /* Диагностика для GET /diag/supabase (ручной мониторинг между этапами):
    точные счётчики schedule (всего/валидных/служебных), построчно по месяцам,
-   time_entries, последняя запись и последний restore из sync_log с возрастом
+   time_entries, возраст последнего обхода (метка /tmp/last_cycle) и
+   последние ошибки из sync_log
    (пульс). months/nmonths — месяцы из файлового кэша.
    Возвращает 0, -1 если общий счёт не получен или sync выключен. */
 int sb_diag(const char *const *months, int nmonths, char *out, size_t cap);

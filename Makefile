@@ -69,7 +69,9 @@ test-js:
 # Юнит-тест буфера Supabase (офлайн, без сети)
 test-supabase:
 	$(CC_NATIVE) -O0 -g -Wall -Wextra $(INCLUDES) tests/test_supabase.c \
-		src/infra/supabase.c src/infra/http_client.c src/core/json_text.c \
+		src/infra/supabase.c src/infra/http_client.c src/infra/file_store.c \
+		src/infra/heartbeat.c \
+		src/core/json_text.c \
 		src/core/strbuf.c src/core/num.c src/core/url_codec.c \
 		src/core/shift.c src/core/date_time.c \
 		src/domain/schedule.c src/domain/time_entry.c \
