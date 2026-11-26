@@ -1,5 +1,6 @@
 #include "server/http_server.h"
 
+#include "server/http_request.h"
 #include "server/router.h"
 #include "web/http_reply.h"
 
@@ -13,39 +14,17 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-/* Читает запрос целиком (заголовки + тело по Content-Length).
- * Возвращает длину прочитанного или -1 при ошибке. */
-static long read_request(int client_fd, char *buf, size_t cap) {
-    size_t total = 0;
-    while (total < cap - 1) {
-        ssize_t n = read(client_fd, buf + total, cap - 1 - total);
-        if (n <= 0) break;
-        total += n;
-        buf[total] = '\0';
-        char *hdr = strstr(buf, "\r\n\r\n");
-        if (hdr) {
-            long clen = 0;
-            char *cl = strstr(buf, "Content-Length:");
-            if (cl) { clen = strtol(cl + 15, NULL, 10); if (clen < 0) clen = 0; }
-            size_t hl = (size_t)(hdr + 4 - buf);
-            if (total >= hl + (size_t)clen) break;
-        }
-    }
-    if (total == 0) return -1;
-    return (long)total;
-}
-
 /* Обрабатывает одно соединение (выполняется в отдельном процессе). */
 static void handle_conn(AppContext *app, int client_fd) {
     char buf[BUFFER_SIZE];
-    if (read_request(client_fd, buf, sizeof(buf)) < 0) return;
+    /* Без таймаута молчащий клиент держал бы этот процесс бесконечно. */
+    http_request_set_timeouts(client_fd, HTTP_REQ_TIMEOUT_SEC);
+    if (http_request_read(client_fd, buf, sizeof(buf)) < 0) return;
 
     char method[16] = { 0 }, path[512] = { 0 };
     sscanf(buf, "%15s %511s", method, path);
 
-    char *body = NULL;
-    char *hdr = strstr(buf, "\r\n\r\n");
-    if (hdr) body = hdr + 4;
+    char *body = http_request_body(buf);
 
     if (!router_dispatch(app, client_fd, method, path, body, buf))
         http_reply(client_fd, "404 Not Found", "Not Found");
